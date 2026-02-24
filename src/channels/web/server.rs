@@ -2880,7 +2880,6 @@ async fn settings_import_handler(
     Ok(StatusCode::NO_CONTENT)
 }
 
-const PLATFORM_MODULE_STATE_KEY: &str = "platform.modules.state";
 const PLATFORM_ORG_WORKSPACE_KEY: &str = "platform.org.workspace";
 const PLATFORM_ORG_MEMBERS_KEY: &str = "platform.org.members";
 
@@ -2979,7 +2978,11 @@ async fn modules_config_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     store
-        .set_setting(&state.user_id, PLATFORM_MODULE_STATE_KEY, &serialized)
+        .set_setting(
+            &state.user_id,
+            crate::platform::PLATFORM_MODULE_STATE_KEY,
+            &serialized,
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -3022,7 +3025,11 @@ async fn update_module_enabled(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     store
-        .set_setting(&state.user_id, PLATFORM_MODULE_STATE_KEY, &serialized)
+        .set_setting(
+            &state.user_id,
+            crate::platform::PLATFORM_MODULE_STATE_KEY,
+            &serialized,
+        )
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -3038,7 +3045,7 @@ async fn load_module_state(state: &GatewayState) -> Vec<ModuleState> {
     };
 
     let stored = match store
-        .get_setting(&state.user_id, PLATFORM_MODULE_STATE_KEY)
+        .get_setting(&state.user_id, crate::platform::PLATFORM_MODULE_STATE_KEY)
         .await
     {
         Ok(Some(value)) => match serde_json::from_value::<Vec<ModuleState>>(value) {

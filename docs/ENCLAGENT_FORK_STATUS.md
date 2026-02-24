@@ -11,7 +11,9 @@ Completed platform-direction updates:
 - Added org workspace and membership control APIs.
 - Added platform schema migrations for org/module/provisioning/skill-fork lineage.
 - Added module-aware inference route enforcement in gateway chat path.
+- Added execution-layer capability gating for commands/tools and ingress-agnostic policy checks.
 - Added EigenDA frontdoor domain profile and addon-facing contract surface.
+- Refined setup wizard onboarding copy and validation paths for Enclagent-specific runtime flows.
 
 ## Runtime Scope
 

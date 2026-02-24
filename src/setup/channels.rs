@@ -376,9 +376,9 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
 
     println!();
     print_info("Tunnel Configuration (for webhook endpoints):");
-    print_info("A tunnel exposes your local agent to the internet, enabling:");
+    print_info("A tunnel exposes your local Enclagent runtime to the internet, enabling:");
     print_info("  - Instant Telegram message delivery (instead of polling)");
-    print_info("  - Slack, Discord, GitHub webhooks");
+    print_info("  - Webhook ingress for HTTP channels and automation triggers");
     println!();
 
     if !confirm("Configure a tunnel?", false)? {

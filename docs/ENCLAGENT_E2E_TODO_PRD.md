@@ -18,7 +18,7 @@ Deliver a production-grade Enclagent runtime that is verifiable-core, module-gov
 - Keep Core-8 catalog available from `/api/modules/catalog`.
 - Keep module state persistence and protected toggle/config APIs operational.
 - Keep addon modules (`hyperliquid_addon`, `eigenda_addon`) disabled by default.
-- Keep inference-route module enforcement active in gateway chat ingestion.
+- Keep capability-gated module enforcement active at submission and tool-dispatch boundaries across all ingress paths.
 
 3. Org workspace controls
 - Keep `owner/admin/member` model operational in protected org APIs.

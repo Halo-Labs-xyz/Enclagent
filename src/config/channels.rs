@@ -81,16 +81,30 @@ impl ChannelsConfig {
             .map(|s| s.to_lowercase() == "true" || s == "1")
             .unwrap_or(true)
         {
-            let frontdoor_enabled = optional_env("GATEWAY_FRONTDOOR_ENABLED")?
-                .map(|s| s.to_lowercase() == "true" || s == "1")
-                .unwrap_or(false);
+            let frontdoor_enabled =
+                first_non_empty_env(&["GATEWAY_FRONTDOOR_ENABLED", "FRONTDOOR_ENABLED"])?
+                    .map(|s| s.to_lowercase() == "true" || s == "1")
+                    .unwrap_or(false);
             let frontdoor = if frontdoor_enabled {
                 Some(GatewayFrontdoorConfig {
-                    require_privy: optional_env("GATEWAY_FRONTDOOR_REQUIRE_PRIVY")?
-                        .map(|s| s.to_lowercase() != "false" && s != "0")
-                        .unwrap_or(true),
-                    privy_app_id: optional_env("GATEWAY_FRONTDOOR_PRIVY_APP_ID")?,
-                    privy_client_id: optional_env("GATEWAY_FRONTDOOR_PRIVY_CLIENT_ID")?,
+                    require_privy: first_non_empty_env(&[
+                        "GATEWAY_FRONTDOOR_REQUIRE_PRIVY",
+                        "FRONTDOOR_REQUIRE_PRIVY",
+                    ])?
+                    .map(|s| s.to_lowercase() != "false" && s != "0")
+                    .unwrap_or(true),
+                    privy_app_id: first_non_empty_env(&[
+                        "GATEWAY_FRONTDOOR_PRIVY_APP_ID",
+                        "FRONTDOOR_PRIVY_APP_ID",
+                        "PRIVY_APP_ID",
+                        "NEXT_PUBLIC_PRIVY_APP_ID",
+                    ])?,
+                    privy_client_id: first_non_empty_env(&[
+                        "GATEWAY_FRONTDOOR_PRIVY_CLIENT_ID",
+                        "FRONTDOOR_PRIVY_CLIENT_ID",
+                        "PRIVY_CLIENT_ID",
+                        "NEXT_PUBLIC_PRIVY_CLIENT_ID",
+                    ])?,
                     provision_command: optional_env("GATEWAY_FRONTDOOR_PROVISION_COMMAND")?,
                     default_instance_url: optional_env("GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL")?,
                     verify_app_base_url: optional_env("GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL")?,
@@ -172,4 +186,120 @@ fn default_channels_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".enclagent")
         .join("channels")
+}
+
+fn first_non_empty_env(keys: &[&str]) -> Result<Option<String>, ConfigError> {
+    for key in keys {
+        if let Some(value) = optional_env(key)? {
+            let normalized = normalize_env_value(value.as_str());
+            if !normalized.is_empty() {
+                return Ok(Some(normalized));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn normalize_env_value(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let maybe_unquoted = trimmed
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|inner| inner.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    maybe_unquoted.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Settings;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn clear_frontdoor_env() {
+        // SAFETY: Guarded by ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("GATEWAY_ENABLED");
+            std::env::remove_var("GATEWAY_FRONTDOOR_ENABLED");
+            std::env::remove_var("FRONTDOOR_ENABLED");
+            std::env::remove_var("GATEWAY_FRONTDOOR_REQUIRE_PRIVY");
+            std::env::remove_var("FRONTDOOR_REQUIRE_PRIVY");
+            std::env::remove_var("GATEWAY_FRONTDOOR_PRIVY_APP_ID");
+            std::env::remove_var("FRONTDOOR_PRIVY_APP_ID");
+            std::env::remove_var("PRIVY_APP_ID");
+            std::env::remove_var("NEXT_PUBLIC_PRIVY_APP_ID");
+            std::env::remove_var("GATEWAY_FRONTDOOR_PRIVY_CLIENT_ID");
+            std::env::remove_var("FRONTDOOR_PRIVY_CLIENT_ID");
+            std::env::remove_var("PRIVY_CLIENT_ID");
+            std::env::remove_var("NEXT_PUBLIC_PRIVY_CLIENT_ID");
+        }
+    }
+
+    #[test]
+    fn frontdoor_accepts_railway_legacy_privy_aliases() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_frontdoor_env();
+
+        // SAFETY: Guarded by ENV_MUTEX in tests.
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "true");
+            std::env::set_var("GATEWAY_FRONTDOOR_ENABLED", "true");
+            std::env::set_var("PRIVY_APP_ID", "\"railway-app-id\"");
+            std::env::set_var("NEXT_PUBLIC_PRIVY_CLIENT_ID", "legacy-client-id");
+        }
+
+        let settings = Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings).expect("channels resolve");
+        let frontdoor = cfg
+            .gateway
+            .expect("gateway config missing")
+            .frontdoor
+            .expect("frontdoor config missing");
+
+        assert_eq!(frontdoor.privy_app_id.as_deref(), Some("railway-app-id"));
+        assert_eq!(
+            frontdoor.privy_client_id.as_deref(),
+            Some("legacy-client-id")
+        );
+
+        clear_frontdoor_env();
+    }
+
+    #[test]
+    fn frontdoor_prefers_gateway_privy_keys_over_aliases() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_frontdoor_env();
+
+        // SAFETY: Guarded by ENV_MUTEX in tests.
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "true");
+            std::env::set_var("GATEWAY_FRONTDOOR_ENABLED", "true");
+            std::env::set_var("GATEWAY_FRONTDOOR_PRIVY_APP_ID", "canonical-app-id");
+            std::env::set_var("PRIVY_APP_ID", "legacy-app-id");
+            std::env::set_var("GATEWAY_FRONTDOOR_PRIVY_CLIENT_ID", "canonical-client-id");
+            std::env::set_var("NEXT_PUBLIC_PRIVY_CLIENT_ID", "legacy-client-id");
+        }
+
+        let settings = Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings).expect("channels resolve");
+        let frontdoor = cfg
+            .gateway
+            .expect("gateway config missing")
+            .frontdoor
+            .expect("frontdoor config missing");
+
+        assert_eq!(frontdoor.privy_app_id.as_deref(), Some("canonical-app-id"));
+        assert_eq!(
+            frontdoor.privy_client_id.as_deref(),
+            Some("canonical-client-id")
+        );
+
+        clear_frontdoor_env();
+    }
 }

@@ -26,6 +26,22 @@ GATEWAY_FRONTDOOR_POLL_INTERVAL_MS=1500
 GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL=https://verify-sepolia.eigencloud.xyz/app
 ```
 
+Privy environment resolution order:
+
+1. `GATEWAY_FRONTDOOR_PRIVY_APP_ID` (recommended canonical key)
+2. `FRONTDOOR_PRIVY_APP_ID`
+3. `PRIVY_APP_ID`
+4. `NEXT_PUBLIC_PRIVY_APP_ID`
+
+Client ID resolution order:
+
+1. `GATEWAY_FRONTDOOR_PRIVY_CLIENT_ID` (recommended canonical key)
+2. `FRONTDOOR_PRIVY_CLIENT_ID`
+3. `PRIVY_CLIENT_ID`
+4. `NEXT_PUBLIC_PRIVY_CLIENT_ID`
+
+For Railway staging and production services, use canonical `GATEWAY_FRONTDOOR_*` keys in both environments and reserve aliases only for migration from legacy deploys.
+
 Configure one provisioning path:
 
 1. Command-based provisioning (recommended for per-user enclave creation)

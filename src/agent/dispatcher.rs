@@ -499,6 +499,20 @@ impl Agent {
         params: &serde_json::Value,
         job_ctx: &JobContext,
     ) -> Result<String, Error> {
+        let required_capabilities = crate::platform::tool_required_capabilities(tool_name);
+        if !required_capabilities.is_empty() {
+            let module_states = self.load_module_states_for_user(&job_ctx.user_id).await;
+            let guard =
+                crate::platform::resolve_capability_guard(required_capabilities, &module_states);
+            if !guard.allowed {
+                return Err(crate::error::ToolError::Disabled {
+                    name: tool_name.to_string(),
+                    reason: format!("Blocked by module policy: {}", guard.reason),
+                }
+                .into());
+            }
+        }
+
         let tool =
             self.tools()
                 .get(tool_name)

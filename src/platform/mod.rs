@@ -5,7 +5,7 @@
 //! - Module state defaults/merge helpers
 //! - Org workspace + membership role helpers
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -80,6 +80,18 @@ pub struct InferenceRouteResolution {
     pub allowed: bool,
     pub reason: String,
 }
+
+/// Result of capability-based module policy enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityGuardResolution {
+    pub allowed: bool,
+    pub required_capabilities: Vec<String>,
+    pub blocked_capabilities: Vec<String>,
+    pub reason: String,
+}
+
+/// Settings key used to persist module state.
+pub const PLATFORM_MODULE_STATE_KEY: &str = "platform.modules.state";
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
@@ -342,6 +354,117 @@ pub fn module_capability_keys(module_id: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Return capability requirements for a command.
+pub fn command_required_capabilities(command: &str) -> &'static [&'static str] {
+    const HYPERLIQUID_CAPS: &[&str] = &["hyperliquid_execute"];
+
+    let normalized = command
+        .trim()
+        .trim_start_matches('/')
+        .replace('_', "-")
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "positions" | "position" | "pos" | "exposure" | "expo" | "funding" | "fund" | "funds"
+        | "vault" | "risk" | "pause-agent" | "pauseagent" | "agent-pause" | "resume-agent"
+        | "resumeagent" | "agent-resume" | "copy-policy" | "copy-status" | "connectors" => {
+            HYPERLIQUID_CAPS
+        }
+        _ => &[],
+    }
+}
+
+/// Return capability requirements for a tool.
+pub fn tool_required_capabilities(tool_name: &str) -> &'static [&'static str] {
+    const HYPERLIQUID_CAPS: &[&str] = &["hyperliquid_execute"];
+    const EIGENDA_CAPS: &[&str] = &["artifact_commitment"];
+
+    let normalized = tool_name.trim().to_ascii_lowercase();
+    if normalized == "hyperliquid_execute" || normalized.starts_with("hyperliquid_") {
+        return HYPERLIQUID_CAPS;
+    }
+    if normalized.starts_with("eigenda_") {
+        return EIGENDA_CAPS;
+    }
+    &[]
+}
+
+fn module_ids_for_capability(capability: &str) -> Vec<String> {
+    curated_module_catalog()
+        .into_iter()
+        .filter(|module| module.capabilities.iter().any(|cap| cap.key == capability))
+        .map(|module| module.id)
+        .collect()
+}
+
+/// Resolve capability requirements against current module state.
+///
+/// This is the execution-layer policy gate for commands and tools. Every
+/// required capability must be backed by at least one enabled module.
+pub fn resolve_capability_guard(
+    required_capabilities: &[&str],
+    states: &[ModuleState],
+) -> CapabilityGuardResolution {
+    let required: Vec<String> = required_capabilities
+        .iter()
+        .map(|cap| cap.trim())
+        .filter(|cap| !cap.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(|cap| cap.to_string())
+        .collect();
+
+    if required.is_empty() {
+        return CapabilityGuardResolution {
+            allowed: true,
+            required_capabilities: Vec::new(),
+            blocked_capabilities: Vec::new(),
+            reason: "No module capability requirements.".to_string(),
+        };
+    }
+
+    let mut blocked_capabilities = Vec::new();
+    let mut reason_segments = Vec::new();
+    for capability in &required {
+        let module_ids = module_ids_for_capability(capability);
+        if module_ids.is_empty() {
+            blocked_capabilities.push(capability.clone());
+            reason_segments.push(format!(
+                "Capability '{}' is not mapped to any module manifest.",
+                capability
+            ));
+            continue;
+        }
+
+        let allowed = module_ids
+            .iter()
+            .any(|module_id| module_is_enabled(states, module_id));
+        if !allowed {
+            blocked_capabilities.push(capability.clone());
+            reason_segments.push(format!(
+                "Capability '{}' requires enabled module(s): {}.",
+                capability,
+                module_ids.join(", ")
+            ));
+        }
+    }
+
+    if blocked_capabilities.is_empty() {
+        return CapabilityGuardResolution {
+            allowed: true,
+            required_capabilities: required,
+            blocked_capabilities,
+            reason: "All required module capabilities are enabled.".to_string(),
+        };
+    }
+
+    CapabilityGuardResolution {
+        allowed: false,
+        required_capabilities: required,
+        blocked_capabilities,
+        reason: reason_segments.join(" "),
+    }
 }
 
 fn contains_any_lower(haystack: &str, patterns: &[&str]) -> bool {
@@ -679,5 +802,57 @@ mod tests {
         assert!(resolved.allowed);
         assert_eq!(resolved.requested_module_id, "developer");
         assert_eq!(resolved.decision.module_id, "general");
+    }
+
+    #[test]
+    fn command_requirements_cover_trading_commands() {
+        assert_eq!(
+            command_required_capabilities("vault"),
+            &["hyperliquid_execute"]
+        );
+        assert_eq!(
+            command_required_capabilities("/copy-policy"),
+            &["hyperliquid_execute"]
+        );
+        assert!(command_required_capabilities("help").is_empty());
+    }
+
+    #[test]
+    fn tool_requirements_detect_addon_scopes() {
+        assert_eq!(
+            tool_required_capabilities("hyperliquid_execute"),
+            &["hyperliquid_execute"]
+        );
+        assert_eq!(
+            tool_required_capabilities("eigenda_commit"),
+            &["artifact_commitment"]
+        );
+        assert!(tool_required_capabilities("json").is_empty());
+    }
+
+    #[test]
+    fn capability_guard_blocks_disabled_addon_capability() {
+        let states = default_module_states();
+        let guard = resolve_capability_guard(&["hyperliquid_execute"], &states);
+        assert!(!guard.allowed);
+        assert_eq!(guard.blocked_capabilities, vec!["hyperliquid_execute"]);
+        assert!(guard.reason.contains("requires enabled module(s)"));
+        assert!(guard.reason.contains("hyperliquid_addon"));
+    }
+
+    #[test]
+    fn capability_guard_allows_enabled_addon_capability() {
+        let mut states = default_module_states();
+        if let Some(module) = states
+            .iter_mut()
+            .find(|module| module.module_id == "hyperliquid_addon")
+        {
+            module.enabled = true;
+            module.status = "enabled".to_string();
+        }
+
+        let guard = resolve_capability_guard(&["hyperliquid_execute"], &states);
+        assert!(guard.allowed);
+        assert!(guard.blocked_capabilities.is_empty());
     }
 }

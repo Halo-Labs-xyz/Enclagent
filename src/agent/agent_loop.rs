@@ -576,6 +576,14 @@ impl Agent {
             }
         }
 
+        if let Submission::UserInput { ref content } = submission
+            && let Some(SubmissionResult::Error { message: reason }) = self
+                .enforce_user_input_route_policy(&message.user_id, content)
+                .await
+        {
+            return Ok(Some(format!("Error: {}", reason)));
+        }
+
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
             self.maybe_hydrate_thread(message, external_thread_id).await;

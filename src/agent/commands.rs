@@ -31,6 +31,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::{ConfigError, Error};
 use crate::llm::ChatMessage;
+use crate::platform::ModuleState;
 use crate::secrets::{VerificationJobCredentialRef, VerificationJobProvider};
 use crate::settings::Settings;
 
@@ -1033,6 +1034,76 @@ impl Agent {
             return Settings::from_db_map(&map);
         }
         Settings::default()
+    }
+
+    pub(super) async fn load_module_states_for_user(&self, user_id: &str) -> Vec<ModuleState> {
+        let defaults = crate::platform::default_module_states();
+        let Some(store) = self.store() else {
+            return defaults;
+        };
+
+        let stored = match store
+            .get_setting(user_id, crate::platform::PLATFORM_MODULE_STATE_KEY)
+            .await
+        {
+            Ok(Some(value)) => match serde_json::from_value::<Vec<ModuleState>>(value) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    tracing::warn!("Invalid stored module state; using defaults: {}", error);
+                    Vec::new()
+                }
+            },
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                tracing::warn!("Failed to load module state; using defaults: {}", error);
+                Vec::new()
+            }
+        };
+
+        if stored.is_empty() {
+            defaults
+        } else {
+            crate::platform::merge_module_states(stored)
+        }
+    }
+
+    pub(super) async fn enforce_system_command_policy(
+        &self,
+        user_id: &str,
+        command: &str,
+    ) -> Option<SubmissionResult> {
+        let required = crate::platform::command_required_capabilities(command);
+        if required.is_empty() {
+            return None;
+        }
+
+        let module_states = self.load_module_states_for_user(user_id).await;
+        let guard = crate::platform::resolve_capability_guard(required, &module_states);
+        if guard.allowed {
+            return None;
+        }
+
+        Some(SubmissionResult::error(format!(
+            "Blocked by module policy: {}",
+            guard.reason
+        )))
+    }
+
+    pub(super) async fn enforce_user_input_route_policy(
+        &self,
+        user_id: &str,
+        content: &str,
+    ) -> Option<SubmissionResult> {
+        let module_states = self.load_module_states_for_user(user_id).await;
+        let route_resolution = crate::platform::resolve_inference_route(content, &module_states);
+        if route_resolution.allowed {
+            return None;
+        }
+
+        Some(SubmissionResult::error(format!(
+            "Blocked by module policy: {}",
+            route_resolution.reason
+        )))
     }
 
     async fn render_connector_status_for_user(&self, user_id: &str) -> String {
@@ -2341,6 +2412,12 @@ impl Agent {
         args: &[String],
     ) -> Result<SubmissionResult, Error> {
         let canonical_command = canonicalize_system_command_name(command);
+        if let Some(blocked) = self
+            .enforce_system_command_policy(user_id, &canonical_command)
+            .await
+        {
+            return Ok(blocked);
+        }
 
         match canonical_command.as_str() {
             "help" => Ok(SubmissionResult::response(concat!(

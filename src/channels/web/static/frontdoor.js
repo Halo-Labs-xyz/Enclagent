@@ -17,6 +17,7 @@ const state = {
 
 const el = {
   bootstrapStatus: document.getElementById("bootstrap-status"),
+  environmentBadge: document.getElementById("environment-badge"),
   walletAddress: document.getElementById("wallet-address"),
   walletChainId: document.getElementById("wallet-chain-id"),
   privyUserId: document.getElementById("privy-user-id"),
@@ -43,24 +44,27 @@ const el = {
 
 async function main() {
   bindEvents();
+  renderEnvironmentBadge();
   try {
     const bootstrap = await fetchJson("/api/frontdoor/bootstrap");
     state.bootstrap = bootstrap;
     if (!bootstrap.enabled) {
-      setBootstrapStatus("Frontdoor mode is disabled for this gateway.", "warn");
+      setBootstrapStatus("Frontdoor mode is disabled for this gateway deployment.", "warn");
       disableLaunch("Frontdoor disabled");
       return;
     }
     if (bootstrap.require_privy && !bootstrap.privy_app_id) {
-      setBootstrapStatus("Privy is required but app id is not configured.", "warn");
-      disableLaunch("Missing GATEWAY_FRONTDOOR_PRIVY_APP_ID");
+      setBootstrapStatus("Privy is required but no Privy App ID was resolved from gateway environment.", "warn");
+      disableLaunch(
+        "Missing Privy App ID. Set GATEWAY_FRONTDOOR_PRIVY_APP_ID (or PRIVY_APP_ID / NEXT_PUBLIC_PRIVY_APP_ID)."
+      );
       return;
     }
     if (bootstrap.require_privy) {
       el.connectWalletBtn.textContent = "Connect Wallet And Authenticate With Privy";
     }
     setBootstrapStatus(
-      "Gateway ready. Complete wallet + Privy auth, then sign launch authorization.",
+      "Gateway ready. Complete identity auth, verify policy, then sign launch intent.",
       "ok"
     );
     syncWalletLinkedInputs(false);
@@ -934,6 +938,30 @@ function requiredChainIdForHost(hostname) {
     return 11155111;
   }
   return null;
+}
+
+function renderEnvironmentBadge() {
+  if (!el.environmentBadge) return;
+  const env = detectDeployEnvironment(window.location.hostname);
+  el.environmentBadge.textContent = env.label;
+  el.environmentBadge.classList.remove("env-prod", "env-staging", "env-dev");
+  el.environmentBadge.classList.add(env.tone);
+}
+
+function detectDeployEnvironment(hostname) {
+  const host = String(hostname || "").toLowerCase();
+  if (!host || host === "localhost" || host === "127.0.0.1") {
+    return { label: "Local", tone: "env-dev" };
+  }
+  if (
+    host.includes("staging") ||
+    host.includes("stage") ||
+    host.includes("-stg") ||
+    host.includes(".stg.")
+  ) {
+    return { label: "Staging", tone: "env-staging" };
+  }
+  return { label: "Production", tone: "env-prod" };
 }
 
 async function switchChain(provider, chainId) {

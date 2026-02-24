@@ -1275,7 +1275,7 @@ impl SetupWizard {
 
     /// Step 5: Embeddings configuration.
     fn step_embeddings(&mut self) -> Result<(), SetupError> {
-        print_info("Embeddings enable semantic search in your workspace memory.");
+        print_info("Embeddings power semantic retrieval for Enclagent workspace memory.");
         println!();
 
         if !confirm("Enable semantic search?", true).map_err(SetupError::Io)? {
@@ -1287,7 +1287,7 @@ impl SetupWizard {
         let backend = self.require_wizard_provider("embeddings setup")?;
         let has_openai_key = std::env::var("OPENAI_API_KEY").is_ok()
             || (backend == "openai" && self.llm_api_key.is_some());
-        let has_nearai = backend == "nearai" || self.session_manager.is_some();
+        let has_nearai = backend == "nearai";
 
         // If the LLM backend is OpenAI and we already have a key, default to OpenAI embeddings
         if backend == "openai" && has_openai_key {
@@ -1298,10 +1298,10 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // If no NEAR AI session and no OpenAI key, only OpenAI is viable
+        // If no NEAR AI path and no OpenAI key, embeddings cannot be enabled.
         if !has_nearai && !has_openai_key {
-            print_info("No NEAR AI session or OpenAI key found for embeddings.");
-            print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
+            print_info("No OPENAI_API_KEY found for embeddings with the selected provider.");
+            print_info("Set OPENAI_API_KEY in your environment to enable semantic retrieval.");
             self.settings.embeddings.enabled = false;
             return Ok(());
         }
@@ -1518,8 +1518,11 @@ impl SetupWizard {
         let options_refs: Vec<(&str, bool)> =
             options.iter().map(|(s, b)| (s.as_str(), *b)).collect();
 
-        let selected = select_many("Which channels do you want to enable?", &options_refs)
-            .map_err(SetupError::Io)?;
+        let selected = select_many(
+            "Which Enclagent ingress channels do you want to enable?",
+            &options_refs,
+        )
+        .map_err(SetupError::Io)?;
 
         let selected_wasm_channels: Vec<String> = wasm_channel_names
             .iter()
@@ -1634,8 +1637,10 @@ impl SetupWizard {
 
     /// Step 7: Heartbeat configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
-        print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
-        print_info("monitoring for notifications, running scheduled workflows).");
+        print_info("Heartbeat runs periodic Enclagent control-plane checks and routines.");
+        print_info(
+            "Use it for connector monitoring, policy drift checks, and scheduled workflows.",
+        );
         println!();
 
         if !confirm("Enable heartbeat?", false).map_err(SetupError::Io)? {
@@ -2105,16 +2110,32 @@ impl SetupWizard {
         let operator_required = custody_mode == "operator_wallet" || custody_mode == "dual_mode";
         let user_required = custody_mode == "user_wallet" || custody_mode == "dual_mode";
 
-        let operator_wallet_address = prompt_wallet_address_with_provisioning(
-            "Operator",
-            current.operator_wallet_address.as_deref(),
-            operator_required,
-        )?;
-        let user_wallet_address = prompt_wallet_address_with_provisioning(
-            "User",
-            current.user_wallet_address.as_deref(),
-            user_required,
-        )?;
+        let operator_wallet_address = if operator_required {
+            prompt_wallet_address_with_provisioning(
+                "Operator",
+                current.operator_wallet_address.as_deref(),
+                true,
+            )?
+        } else {
+            current
+                .operator_wallet_address
+                .as_deref()
+                .filter(|value| is_hex_wallet_address(value))
+                .map(str::to_string)
+        };
+        let user_wallet_address = if user_required {
+            prompt_wallet_address_with_provisioning(
+                "User",
+                current.user_wallet_address.as_deref(),
+                true,
+            )?
+        } else {
+            current
+                .user_wallet_address
+                .as_deref()
+                .filter(|value| is_hex_wallet_address(value))
+                .map(str::to_string)
+        };
         let vault_address = prompt_wallet_address(
             "Vault address (0x..., optional)",
             current.vault_address.as_deref(),
@@ -2900,8 +2921,13 @@ fn generate_wallet_address() -> String {
 }
 
 fn parse_positive_u64(raw: &str, field: &str) -> Result<u64, String> {
-    let value = raw
-        .trim()
+    let normalized = raw.trim();
+    if normalized.starts_with("0x") || normalized.starts_with("0X") {
+        return Err(format!(
+            "{field} must be a positive integer, not a wallet address."
+        ));
+    }
+    let value = normalized
         .parse::<u64>()
         .map_err(|_| format!("{field} must be a positive integer."))?;
     if value == 0 {
@@ -2917,8 +2943,13 @@ fn parse_non_negative_u64(raw: &str, field: &str) -> Result<u64, String> {
 }
 
 fn parse_positive_u32(raw: &str, field: &str) -> Result<u32, String> {
-    let value = raw
-        .trim()
+    let normalized = raw.trim();
+    if normalized.starts_with("0x") || normalized.starts_with("0X") {
+        return Err(format!(
+            "{field} must be a positive integer, not a wallet address."
+        ));
+    }
+    let value = normalized
         .parse::<u32>()
         .map_err(|_| format!("{field} must be a positive integer."))?;
     if value == 0 {
@@ -3782,9 +3813,19 @@ mod tests {
 
         assert_eq!(parse_positive_u64("1", "Timeout").unwrap(), 1);
         assert!(parse_positive_u64("0", "Timeout").is_err());
+        assert!(
+            parse_positive_u64("0x1234", "Timeout")
+                .unwrap_err()
+                .contains("not a wallet address")
+        );
         assert_eq!(parse_non_negative_u64("0", "Backoff").unwrap(), 0);
         assert_eq!(parse_positive_u32("2", "Leverage").unwrap(), 2);
         assert!(parse_positive_u32("0", "Leverage").is_err());
+        assert!(
+            parse_positive_u32("0x1234", "Leverage")
+                .unwrap_err()
+                .contains("not a wallet address")
+        );
         assert_eq!(parse_non_negative_u32("0", "Retries").unwrap(), 0);
     }
 
