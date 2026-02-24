@@ -16,7 +16,7 @@ Enclagent is a single-product Rust runtime.
 - One embedded web gateway (`/api/*`)
 - One frontdoor contract (`/api/frontdoor/*`)
 - Deterministic intent/receipt/verification lineage
-- Core-8 module suite with optional Hyperliquid and EigenDA addons
+- Core-8 module suite with addons (i.e. Hyperliquid, EigenDA)
 - Explicit policy gates for live trading actions when trading addon is enabled
 
 No separate Next.js applications are part of this repository.
