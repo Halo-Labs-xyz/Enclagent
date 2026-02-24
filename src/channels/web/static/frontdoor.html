@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enclagent Session Gateway</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/frontdoor.css">
+</head>
+<body>
+  <div class="bg-noise"></div>
+  <main class="frontdoor-shell">
+    <section class="hero-card">
+      <p class="eyebrow">Enclagent Live Gateway</p>
+      <h1>Create Your Enclaved Agent Session</h1>
+      <p class="hero-copy">
+        Connect wallet, sign an authorization message, complete required configuration, and launch a dedicated EigenCompute enclave.
+      </p>
+      <div class="status-strip" id="bootstrap-status">Loading gateway configuration...</div>
+    </section>
+
+    <section class="panel" id="wallet-panel">
+      <h2>1. Wallet Auth</h2>
+      <div class="field-grid">
+        <label>
+          <span>Wallet Address</span>
+          <input id="wallet-address" type="text" placeholder="Connect wallet to populate" readonly>
+        </label>
+        <label>
+          <span>Chain ID</span>
+          <input id="wallet-chain-id" type="text" placeholder="-" readonly>
+        </label>
+      </div>
+      <div class="field-grid">
+        <label>
+          <span>Privy User ID</span>
+          <input id="privy-user-id" type="text" placeholder="Will populate after SIWE auth" readonly>
+        </label>
+        <label>
+          <span>Privy Auth Status</span>
+          <input id="privy-auth-status" type="text" value="Not authenticated" readonly>
+        </label>
+      </div>
+      <div class="actions">
+        <button id="connect-wallet-btn" class="btn-primary">Connect Wallet And Authenticate</button>
+      </div>
+      <p class="hint">
+        This runs wallet connect + Privy SIWE authentication first, then unlocks enclave launch.
+      </p>
+      <div class="error-text" id="wallet-error"></div>
+    </section>
+
+    <section class="panel" id="config-panel">
+      <h2>2. Mandatory Session Configuration</h2>
+      <form id="config-form">
+        <div class="field-grid">
+          <label class="full-width">
+            <span>Intent For Config Suggestion</span>
+            <textarea id="intent-prompt" rows="3" placeholder="Example: conservative BTC-only paper trading"></textarea>
+          </label>
+        </div>
+        <div class="actions">
+          <button id="suggest-config-btn" class="btn-secondary" type="button">Suggest Config</button>
+        </div>
+        <p class="hint" id="suggestion-message"></p>
+        <div class="error-text" id="suggestion-error"></div>
+        <div class="field-grid">
+          <label>
+            <span>Profile Name</span>
+            <input id="profile-name" name="profile_name" type="text" maxlength="64" required placeholder="alpha-user-v1">
+          </label>
+          <label>
+            <span>Hyperliquid Network</span>
+            <select id="hyperliquid-network" name="hyperliquid_network" required>
+              <option value="testnet">testnet</option>
+              <option value="mainnet">mainnet</option>
+            </select>
+          </label>
+          <label>
+            <span>Execution Policy</span>
+            <select id="paper-live-policy" name="paper_live_policy" required>
+              <option value="paper_only">paper_only</option>
+              <option value="paper_first">paper_first</option>
+              <option value="live_allowed">live_allowed</option>
+            </select>
+          </label>
+          <label>
+            <span>Hyperliquid API Base URL (optional)</span>
+            <input id="hyperliquid-api-base-url" name="hyperliquid_api_base_url" type="text" placeholder="https://api.hyperliquid-testnet.xyz">
+          </label>
+          <label>
+            <span>Hyperliquid WS URL (optional)</span>
+            <input id="hyperliquid-ws-url" name="hyperliquid_ws_url" type="text" placeholder="wss://api.hyperliquid-testnet.xyz/ws">
+          </label>
+          <label>
+            <span>Request Timeout (ms)</span>
+            <input id="request-timeout-ms" name="request_timeout_ms" type="number" min="1000" max="120000" value="10000" required>
+          </label>
+          <label>
+            <span>Max Retries</span>
+            <input id="max-retries" name="max_retries" type="number" min="0" max="10" value="3" required>
+          </label>
+          <label>
+            <span>Retry Backoff (ms)</span>
+            <input id="retry-backoff-ms" name="retry_backoff_ms" type="number" min="0" max="30000" value="500" required>
+          </label>
+          <label>
+            <span>Max Position (USD)</span>
+            <input id="max-position-usd" name="max_position_size_usd" type="number" min="1" max="10000000" value="1000" required>
+          </label>
+          <label>
+            <span>Leverage Cap</span>
+            <input id="leverage-cap" name="leverage_cap" type="number" min="1" max="20" value="2" required>
+          </label>
+          <label>
+            <span>Copy Max Leverage</span>
+            <input id="max-leverage" name="max_leverage" type="number" min="1" max="20" value="2" required>
+          </label>
+          <label>
+            <span>Max Allocation (USD)</span>
+            <input id="max-allocation-usd" name="max_allocation_usd" type="number" min="1" max="10000000" value="1000" required>
+          </label>
+          <label>
+            <span>Per-trade Cap (USD)</span>
+            <input id="per-trade-cap-usd" name="per_trade_notional_cap_usd" type="number" min="1" max="10000000" value="100" required>
+          </label>
+          <label>
+            <span>Max Slippage (bps)</span>
+            <input id="max-slippage-bps" name="max_slippage_bps" type="number" min="1" max="5000" value="50" required>
+          </label>
+          <label>
+            <span>Symbol Allowlist (comma separated)</span>
+            <input id="symbol-allowlist" name="symbol_allowlist" type="text" value="BTC,ETH,SOL" required>
+          </label>
+          <label>
+            <span>Symbol Denylist (comma separated, optional)</span>
+            <input id="symbol-denylist" name="symbol_denylist" type="text" placeholder="e.g. MEME,PEPE">
+          </label>
+          <label>
+            <span>Custody Mode</span>
+            <select id="custody-mode" name="custody_mode" required>
+              <option value="operator_wallet">operator_wallet</option>
+              <option value="user_wallet">user_wallet</option>
+              <option value="dual_mode">dual_mode</option>
+            </select>
+          </label>
+          <label>
+            <span>Operator Wallet Address</span>
+            <input id="operator-wallet-address" name="operator_wallet_address" type="text" placeholder="0x... (required for operator/dual)">
+          </label>
+          <label>
+            <span>User Wallet Address</span>
+            <input id="user-wallet-address" name="user_wallet_address" type="text" placeholder="0x... (auto-filled from connected wallet)">
+          </label>
+          <label>
+            <span>Vault Address (optional)</span>
+            <input id="vault-address" name="vault_address" type="text" placeholder="0x...">
+          </label>
+          <label>
+            <span>Information Sharing Scope</span>
+            <select id="information-sharing-scope" name="information_sharing_scope" required>
+              <option value="signals_only">signals_only</option>
+              <option value="signals_and_execution">signals_and_execution</option>
+              <option value="full_audit">full_audit</option>
+              <option value="none">none</option>
+            </select>
+          </label>
+          <label>
+            <span>Kill Switch Behavior</span>
+            <select id="kill-switch-behavior" name="kill_switch_behavior" required>
+              <option value="pause_agent">pause_agent</option>
+              <option value="cancel_open_orders">cancel_open_orders</option>
+              <option value="cancel_and_flatten">cancel_and_flatten</option>
+            </select>
+          </label>
+          <label>
+            <span>Gateway Auth Key (set your own)</span>
+            <input id="gateway-auth-key" name="gateway_auth_key" type="password" minlength="16" maxlength="128" required placeholder="16-128 chars, no spaces">
+          </label>
+          <label>
+            <span>EigenCloud Auth Key (optional)</span>
+            <input id="eigencloud-auth-key" name="eigencloud_auth_key" type="password" placeholder="Optional key passed to provisioner">
+          </label>
+          <label>
+            <span>Verification Backend</span>
+            <select id="verification-backend" name="verification_backend" required>
+              <option value="eigencloud_primary">eigencloud_primary</option>
+              <option value="fallback_only">fallback_only</option>
+            </select>
+          </label>
+          <label>
+            <span>Verification Endpoint (optional)</span>
+            <input id="verification-eigencloud-endpoint" name="verification_eigencloud_endpoint" type="text" placeholder="https://verify-sepolia.eigencloud.xyz">
+          </label>
+          <label>
+            <span>Verification Auth Scheme</span>
+            <select id="verification-eigencloud-auth-scheme" name="verification_eigencloud_auth_scheme" required>
+              <option value="bearer">bearer</option>
+              <option value="api_key">api_key</option>
+            </select>
+          </label>
+          <label>
+            <span>Verification Timeout (ms)</span>
+            <input id="verification-eigencloud-timeout-ms" name="verification_eigencloud_timeout_ms" type="number" min="1" max="120000" value="5000" required>
+          </label>
+          <label>
+            <span>Fallback Signing Key ID (optional)</span>
+            <input id="verification-fallback-signing-key-id" name="verification_fallback_signing_key_id" type="text" maxlength="128" placeholder="optional signer id">
+          </label>
+          <label>
+            <span>Fallback Chain Path (optional)</span>
+            <input id="verification-fallback-chain-path" name="verification_fallback_chain_path" type="text" placeholder="/app/.enclagent/receipts/receipt-chain.ndjson">
+          </label>
+          <label class="checkbox-label">
+            <input id="kill-switch-enabled" name="kill_switch_enabled" type="checkbox" checked>
+            <span>Enable kill switch protections</span>
+          </label>
+          <label class="checkbox-label">
+            <input id="enable-memory" name="enable_memory" type="checkbox" checked>
+            <span>Enable memory/autonomous context tools</span>
+          </label>
+          <label class="checkbox-label">
+            <input id="verification-fallback-enabled" name="verification_fallback_enabled" type="checkbox" checked>
+            <span>Enable verification fallback chain</span>
+          </label>
+          <label class="checkbox-label">
+            <input id="verification-fallback-require-signed" name="verification_fallback_require_signed_receipts" type="checkbox" checked>
+            <span>Require signed fallback receipts</span>
+          </label>
+        </div>
+        <label class="checkbox-label terms">
+          <input id="accept-terms" name="accept_terms" type="checkbox" required>
+          <span>I understand this launches dedicated infrastructure and enforces the selected risk profile.</span>
+        </label>
+        <div class="actions">
+          <button id="launch-session-btn" class="btn-primary" type="submit">Sign And Launch Enclave</button>
+        </div>
+      </form>
+      <div class="error-text" id="config-error"></div>
+    </section>
+
+    <section class="panel loading-panel hidden" id="loading-panel">
+      <h2>3. Enclave Provisioning</h2>
+      <div class="loader-wrap">
+        <div class="orbital-loader">
+          <div class="ring ring-a"></div>
+          <div class="ring ring-b"></div>
+          <div class="ring ring-c"></div>
+          <span class="loader-core">TEE</span>
+        </div>
+      </div>
+      <p class="loader-title" id="loading-title">Spinning up your personal enclave...</p>
+      <p class="loader-copy" id="loading-copy">Allocating isolated runtime, sealing session config, and syncing gateway policies.</p>
+      <div class="loader-progress-track">
+        <div class="loader-progress-fill" id="loader-progress-fill"></div>
+      </div>
+      <div class="session-kv" id="session-kv"></div>
+      <div class="actions hidden" id="ready-actions">
+        <a id="open-instance-link" class="btn-primary" href="#" target="_self" rel="noopener">Open Personal Instance</a>
+        <a id="open-verify-link" class="btn-primary hidden" href="#" target="_blank" rel="noopener">Open Eigen Verify App</a>
+      </div>
+      <div class="error-text" id="loading-error"></div>
+    </section>
+  </main>
+  <script src="/frontdoor.js"></script>
+</body>
+</html>

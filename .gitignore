@@ -1,0 +1,31 @@
+
+.env
+.env.local
+.env.*
+!.env.example
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Sidecar tool data
+.sidecar/
+.todos/
+
+target/
+**/target/
+node_modules/
+**/node_modules/
+.next/
+**/.next/
+coverage/
+**/coverage/
+dist/
+**/dist/
+*.tsbuildinfo
+.DS_Store
+
+# Benchmark results (local runs, not committed)
+bench-results/
+
+# WASM build artifacts (loaded from disk, not bundled)
+*.wasm
