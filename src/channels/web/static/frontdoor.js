@@ -113,7 +113,7 @@ function bindEvents() {
         body: {
           wallet_address: state.walletAddress,
           intent,
-          domain: "hyperliquid",
+          domain: "general",
           gateway_auth_key: optionalValue("gateway-auth-key"),
         },
       });
@@ -569,7 +569,7 @@ function readConfig() {
 
   return {
     config_version: 2,
-    profile_domain: "hyperliquid",
+    profile_domain: "general",
     domain_overrides: {},
     inference_summary: null,
     inference_confidence: null,

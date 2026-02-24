@@ -2,8 +2,8 @@
 
 ## Primary Directive
 
-- Enclagent is a verifiable Hyperliquid agent kit.
-- Build on the existing Enclagent runtime baseline while preserving privacy and security as non-negotiable baseline properties.
+- Enclagent is a verifiable agent core platform with modular capability addons.
+- Build on the existing Enclagent IronClaw-lineage runtime baseline while preserving privacy and security as non-negotiable baseline properties.
 - Prioritize verifiability, sovereignty, and deterministic audit artifacts over feature breadth.
 - Apply maximum diligence for all work in this directory: `MAKE NO MISTAKES.`
 
@@ -16,15 +16,16 @@
 
 ## Decision Filters (Apply Before Any Change)
 
-- Hyperliquid alignment: the change must directly support Hyperliquid-first operation or demo reliability.
+- Platform alignment: the change must directly support verifiable core operation, module governance, or production reliability.
 - Verifiability alignment: the change must preserve or improve intent/receipt/proof traceability.
 - Security alignment: do not weaken sandbox, secrets handling, policy gating, or prompt/tool safety controls.
 - Operability alignment: status/doctor/monitoring and rollback behavior must remain intact or improve.
 
 ## Runtime Policy Requirements
 
-- Keep paper-trading mode as the default execution mode unless explicitly overridden by policy.
-- Do not permit live-order execution without explicit signer/policy gate checks.
+- Keep non-trading general workflows available without requiring trading modules.
+- Keep Hyperliquid and EigenDA as optional addons disabled by default unless explicitly enabled by policy.
+- Do not permit live-order execution without explicit signer/policy gate checks when trading addon is enabled.
 - Persist verifiable intent and execution receipts for every agent action in scope.
 - Keep fallback verification path available when primary verification backend is degraded.
 
@@ -36,7 +37,7 @@
 ## Documentation Requirements
 
 - When public utility behavior changes, update docs under `docs/` in the same branch.
-- Keep `docs/ENCLAGENT_FORK_STATUS.md` synchronized with completed Hyperliquid-native milestones.
+- Keep `docs/ENCLAGENT_FORK_STATUS.md` synchronized with completed module-platform milestones.
 
 ## Git Branch Strategy (Mandatory)
 

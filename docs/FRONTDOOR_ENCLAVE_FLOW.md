@@ -141,20 +141,8 @@ Stored fields per wallet:
 Before provisioning, users must supply:
 
 - `config_version` (supported: `1`, `2`; current: `2`)
-- `profile_domain` (current default: `hyperliquid`)
+- `profile_domain` (current default: `general`)
 - `profile_name`
-- `hyperliquid_network`
-- `paper_live_policy`
-- `request_timeout_ms`
-- `max_retries`
-- `retry_backoff_ms`
-- `max_position_size_usd`
-- `leverage_cap`
-- `max_allocation_usd`
-- `per_trade_notional_cap_usd`
-- `max_leverage`
-- `max_slippage_bps`
-- `symbol_allowlist`
 - `custody_mode`
 - `information_sharing_scope`
 - `kill_switch_behavior`
@@ -170,6 +158,18 @@ Optional:
 - `inference_summary`
 - `inference_confidence`
 - `inference_warnings`
+- `hyperliquid_network` (required when `profile_domain=hyperliquid`)
+- `paper_live_policy` (required when `profile_domain=hyperliquid`)
+- `request_timeout_ms` (required when `profile_domain=hyperliquid`)
+- `max_retries` (required when `profile_domain=hyperliquid`)
+- `retry_backoff_ms` (required when `profile_domain=hyperliquid`)
+- `max_position_size_usd` (required when `profile_domain=hyperliquid`)
+- `leverage_cap` (required when `profile_domain=hyperliquid`)
+- `max_allocation_usd` (required when `profile_domain=hyperliquid`)
+- `per_trade_notional_cap_usd` (required when `profile_domain=hyperliquid`)
+- `max_leverage` (required when `profile_domain=hyperliquid`)
+- `max_slippage_bps` (required when `profile_domain=hyperliquid`)
+- `symbol_allowlist` (required when `profile_domain=hyperliquid`)
 - `hyperliquid_api_base_url`
 - `hyperliquid_ws_url`
 - `symbol_denylist`

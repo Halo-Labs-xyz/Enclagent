@@ -270,6 +270,37 @@ pub async fn start_server(
             "/api/settings/{key}",
             axum::routing::delete(settings_delete_handler),
         )
+        // Modules
+        .route("/api/modules/catalog", get(modules_catalog_handler))
+        .route("/api/modules/state", get(modules_state_handler))
+        .route(
+            "/api/modules/{module_id}/enable",
+            post(modules_enable_handler),
+        )
+        .route(
+            "/api/modules/{module_id}/disable",
+            post(modules_disable_handler),
+        )
+        .route(
+            "/api/modules/{module_id}/health",
+            get(modules_health_handler),
+        )
+        .route(
+            "/api/modules/{module_id}/config",
+            axum::routing::put(modules_config_handler),
+        )
+        // Org
+        .route("/api/org/current", get(org_current_handler))
+        .route("/api/org/members", get(org_members_handler))
+        .route("/api/org/members/invite", post(org_members_invite_handler))
+        .route(
+            "/api/org/members/{member_id}/role",
+            axum::routing::put(org_members_role_handler),
+        )
+        .route(
+            "/api/org/members/{member_id}",
+            axum::routing::delete(org_members_delete_handler),
+        )
         // Gateway control plane
         .route("/api/status/channels", get(status_channels_handler))
         .route("/api/status/verification", get(status_verification_handler))
@@ -509,11 +540,66 @@ async fn chat_send_handler(
         ));
     }
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
+    let module_states = load_module_state(&state).await;
+    let route_resolution = crate::platform::resolve_inference_route(&req.content, &module_states);
+    if !route_resolution.allowed {
+        return Err((
+            StatusCode::FORBIDDEN,
+            format!("Blocked by module policy: {}", route_resolution.reason),
+        ));
+    }
 
+    let effective_module_id = route_resolution.decision.module_id.clone();
+    let enabled_modules: Vec<String> = module_states
+        .iter()
+        .filter(|module| module.enabled)
+        .map(|module| module.module_id.clone())
+        .collect();
+
+    let route_decision_json = serde_json::to_value(&route_resolution.decision).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize route decision: {}", e),
+        )
+    })?;
+    let route_resolution_json = serde_json::to_value(&route_resolution).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize route resolution: {}", e),
+        )
+    })?;
+
+    let mut metadata = serde_json::Map::new();
+    if let Some(ref thread_id) = req.thread_id {
+        metadata.insert(
+            "thread_id".to_string(),
+            serde_json::Value::String(thread_id.clone()),
+        );
+    }
+    metadata.insert("inference_route".to_string(), route_decision_json);
+    metadata.insert(
+        "inference_route_resolution".to_string(),
+        route_resolution_json,
+    );
+    metadata.insert(
+        "module_capabilities".to_string(),
+        serde_json::json!(crate::platform::module_capability_keys(
+            &effective_module_id
+        )),
+    );
+    metadata.insert(
+        "enabled_modules".to_string(),
+        serde_json::json!(enabled_modules),
+    );
+    metadata.insert(
+        "effective_module".to_string(),
+        serde_json::Value::String(effective_module_id),
+    );
+
+    let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content)
+        .with_metadata(serde_json::Value::Object(metadata));
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
-        msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
 
     let msg_id = msg.id;
@@ -2792,6 +2878,446 @@ async fn settings_import_handler(
         })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+const PLATFORM_MODULE_STATE_KEY: &str = "platform.modules.state";
+const PLATFORM_ORG_WORKSPACE_KEY: &str = "platform.org.workspace";
+const PLATFORM_ORG_MEMBERS_KEY: &str = "platform.org.members";
+
+// --- Modules handlers ---
+
+async fn modules_catalog_handler() -> Json<ModuleCatalogResponse> {
+    Json(ModuleCatalogResponse {
+        modules: crate::platform::curated_module_catalog(),
+    })
+}
+
+async fn modules_state_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<ModuleStateResponse>, (StatusCode, String)> {
+    let modules = load_module_state(&state).await;
+    Ok(Json(ModuleStateResponse { modules }))
+}
+
+async fn modules_enable_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(module_id): Path<String>,
+) -> Result<Json<ModuleUpdateResponse>, (StatusCode, String)> {
+    update_module_enabled(&state, &module_id, true).await
+}
+
+async fn modules_disable_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(module_id): Path<String>,
+) -> Result<Json<ModuleUpdateResponse>, (StatusCode, String)> {
+    update_module_enabled(&state, &module_id, false).await
+}
+
+async fn modules_health_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(module_id): Path<String>,
+) -> Result<Json<ModuleHealthResponse>, (StatusCode, String)> {
+    let modules = load_module_state(&state).await;
+    let module = modules
+        .into_iter()
+        .find(|m| m.module_id == module_id)
+        .ok_or((StatusCode::NOT_FOUND, "Unknown module".to_string()))?;
+
+    let settings = load_effective_settings(&state).await;
+    let verification = build_verification_status_response(&settings);
+    let checks = serde_json::json!({
+        "module_id": module.module_id,
+        "enabled": module.enabled,
+        "catalog_entry_exists": crate::platform::module_exists(&module_id),
+        "verification_status": verification.status,
+        "verification_backend": verification.backend,
+    });
+
+    Ok(Json(ModuleHealthResponse {
+        module_id,
+        enabled: module.enabled,
+        status: if module.enabled {
+            "healthy".to_string()
+        } else {
+            "disabled".to_string()
+        },
+        checks,
+    }))
+}
+
+async fn modules_config_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(module_id): Path<String>,
+    Json(body): Json<ModuleConfigUpdateRequest>,
+) -> Result<Json<ModuleUpdateResponse>, (StatusCode, String)> {
+    if !crate::platform::module_exists(&module_id) {
+        return Err((StatusCode::NOT_FOUND, "Unknown module".to_string()));
+    }
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    require_module_admin(&state).await?;
+
+    let mut modules = load_module_state(&state).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let module_idx = modules
+        .iter()
+        .position(|m| m.module_id == module_id)
+        .ok_or((StatusCode::NOT_FOUND, "Unknown module".to_string()))?;
+
+    modules[module_idx].config = body.config;
+    modules[module_idx].status = if modules[module_idx].enabled {
+        "enabled".to_string()
+    } else {
+        "disabled".to_string()
+    };
+    modules[module_idx].updated_at = now;
+    let updated_module = modules[module_idx].clone();
+    let serialized = serde_json::to_value(&modules)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    store
+        .set_setting(&state.user_id, PLATFORM_MODULE_STATE_KEY, &serialized)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(ModuleUpdateResponse {
+        module: updated_module,
+    }))
+}
+
+async fn update_module_enabled(
+    state: &GatewayState,
+    module_id: &str,
+    enabled: bool,
+) -> Result<Json<ModuleUpdateResponse>, (StatusCode, String)> {
+    if !crate::platform::module_exists(module_id) {
+        return Err((StatusCode::NOT_FOUND, "Unknown module".to_string()));
+    }
+
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    require_module_admin(state).await?;
+
+    let mut modules = load_module_state(state).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let module_idx = modules
+        .iter()
+        .position(|m| m.module_id == module_id)
+        .ok_or((StatusCode::NOT_FOUND, "Unknown module".to_string()))?;
+
+    modules[module_idx].enabled = enabled;
+    modules[module_idx].status = if enabled {
+        "enabled".to_string()
+    } else {
+        "disabled".to_string()
+    };
+    modules[module_idx].updated_at = now;
+    let updated_module = modules[module_idx].clone();
+    let serialized = serde_json::to_value(&modules)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    store
+        .set_setting(&state.user_id, PLATFORM_MODULE_STATE_KEY, &serialized)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(ModuleUpdateResponse {
+        module: updated_module,
+    }))
+}
+
+async fn load_module_state(state: &GatewayState) -> Vec<ModuleState> {
+    let defaults = crate::platform::default_module_states();
+    let Some(store) = state.store.as_ref() else {
+        return defaults;
+    };
+
+    let stored = match store
+        .get_setting(&state.user_id, PLATFORM_MODULE_STATE_KEY)
+        .await
+    {
+        Ok(Some(value)) => match serde_json::from_value::<Vec<ModuleState>>(value) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                tracing::warn!("Invalid stored module state; using defaults: {}", error);
+                Vec::new()
+            }
+        },
+        Ok(None) => Vec::new(),
+        Err(error) => {
+            tracing::warn!("Failed to load module state; using defaults: {}", error);
+            Vec::new()
+        }
+    };
+
+    if stored.is_empty() {
+        defaults
+    } else {
+        crate::platform::merge_module_states(stored)
+    }
+}
+
+async fn require_module_admin(state: &GatewayState) -> Result<(), (StatusCode, String)> {
+    let role = actor_role_for_state(state).await;
+    if crate::platform::can_manage_modules(&role) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "Module management requires owner/admin role".to_string(),
+        ))
+    }
+}
+
+// --- Org handlers ---
+
+async fn org_current_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<OrgCurrentResponse>, (StatusCode, String)> {
+    let workspace = load_org_workspace(&state).await;
+    let members = load_org_members(&state).await;
+    let membership = ensure_actor_membership(&state, members).await?;
+
+    Ok(Json(OrgCurrentResponse {
+        workspace,
+        membership,
+    }))
+}
+
+async fn org_members_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<OrgMembersResponse>, (StatusCode, String)> {
+    let workspace = load_org_workspace(&state).await;
+    let members = load_org_members(&state).await;
+
+    Ok(Json(OrgMembersResponse { workspace, members }))
+}
+
+async fn org_members_invite_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<OrgInviteRequest>,
+) -> Result<Json<OrgMembersResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let actor_role = actor_role_for_state(&state).await;
+    if !crate::platform::can_manage_org(&actor_role) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Org invite requires owner/admin role".to_string(),
+        ));
+    }
+
+    let role = crate::platform::normalize_org_role(&body.role)
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid role".to_string()))?;
+    let member_id = body.member_id.trim().to_string();
+    if member_id.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "member_id is required".to_string()));
+    }
+
+    let mut members = load_org_members(&state).await;
+    let now = chrono::Utc::now().to_rfc3339();
+
+    if let Some(existing) = members.iter_mut().find(|m| m.member_id == member_id) {
+        existing.role = role;
+        existing.status = "invited".to_string();
+        existing.updated_at = now.clone();
+    } else {
+        members.push(OrgMembership {
+            member_id,
+            role,
+            status: "invited".to_string(),
+            invited_at: now.clone(),
+            updated_at: now,
+        });
+    }
+
+    store
+        .set_setting(
+            &state.user_id,
+            PLATFORM_ORG_MEMBERS_KEY,
+            &serde_json::to_value(&members)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(OrgMembersResponse {
+        workspace: load_org_workspace(&state).await,
+        members,
+    }))
+}
+
+async fn org_members_role_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(member_id): Path<String>,
+    Json(body): Json<OrgRoleUpdateRequest>,
+) -> Result<Json<OrgMembersResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let actor_role = actor_role_for_state(&state).await;
+    if actor_role != "owner" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Only owner can update member roles".to_string(),
+        ));
+    }
+
+    let normalized_role = crate::platform::normalize_org_role(&body.role)
+        .ok_or((StatusCode::BAD_REQUEST, "Invalid role".to_string()))?;
+
+    let mut members = load_org_members(&state).await;
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut updated = false;
+
+    for member in &mut members {
+        if member.member_id == member_id {
+            member.role = normalized_role.clone();
+            member.status = "active".to_string();
+            member.updated_at = now.clone();
+            updated = true;
+            break;
+        }
+    }
+    if !updated {
+        return Err((StatusCode::NOT_FOUND, "Member not found".to_string()));
+    }
+
+    store
+        .set_setting(
+            &state.user_id,
+            PLATFORM_ORG_MEMBERS_KEY,
+            &serde_json::to_value(&members)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(OrgMembersResponse {
+        workspace: load_org_workspace(&state).await,
+        members,
+    }))
+}
+
+async fn org_members_delete_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(member_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let actor_role = actor_role_for_state(&state).await;
+    if actor_role != "owner" {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Only owner can remove members".to_string(),
+        ));
+    }
+    if member_id == state.user_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Owner cannot remove self".to_string(),
+        ));
+    }
+
+    let mut members = load_org_members(&state).await;
+    let before = members.len();
+    members.retain(|member| member.member_id != member_id);
+    if members.len() == before {
+        return Err((StatusCode::NOT_FOUND, "Member not found".to_string()));
+    }
+
+    store
+        .set_setting(
+            &state.user_id,
+            PLATFORM_ORG_MEMBERS_KEY,
+            &serde_json::to_value(&members)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn actor_role_for_state(state: &GatewayState) -> String {
+    let members = load_org_members(state).await;
+    members
+        .iter()
+        .find(|member| member.member_id == state.user_id)
+        .map(|member| member.role.clone())
+        .unwrap_or_else(|| "member".to_string())
+}
+
+async fn ensure_actor_membership(
+    state: &GatewayState,
+    mut members: Vec<OrgMembership>,
+) -> Result<OrgMembership, (StatusCode, String)> {
+    if let Some(found) = members
+        .iter()
+        .find(|member| member.member_id == state.user_id)
+        .cloned()
+    {
+        return Ok(found);
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let fallback = OrgMembership {
+        member_id: state.user_id.clone(),
+        role: "owner".to_string(),
+        status: "active".to_string(),
+        invited_at: now.clone(),
+        updated_at: now,
+    };
+    members.push(fallback.clone());
+
+    if let Some(store) = state.store.as_ref() {
+        let value = serde_json::to_value(&members)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        store
+            .set_setting(&state.user_id, PLATFORM_ORG_MEMBERS_KEY, &value)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    Ok(fallback)
+}
+
+async fn load_org_workspace(state: &GatewayState) -> OrgWorkspace {
+    let default = crate::platform::default_org_workspace(&state.user_id);
+    let Some(store) = state.store.as_ref() else {
+        return default;
+    };
+    match store
+        .get_setting(&state.user_id, PLATFORM_ORG_WORKSPACE_KEY)
+        .await
+    {
+        Ok(Some(value)) => serde_json::from_value::<OrgWorkspace>(value).unwrap_or(default),
+        _ => default,
+    }
+}
+
+async fn load_org_members(state: &GatewayState) -> Vec<OrgMembership> {
+    let default = crate::platform::default_org_memberships(&state.user_id);
+    let Some(store) = state.store.as_ref() else {
+        return default;
+    };
+
+    match store
+        .get_setting(&state.user_id, PLATFORM_ORG_MEMBERS_KEY)
+        .await
+    {
+        Ok(Some(value)) => serde_json::from_value::<Vec<OrgMembership>>(value).unwrap_or(default),
+        _ => default,
+    }
 }
 
 // --- Gateway control plane handlers ---

@@ -2,22 +2,27 @@
 
 ## Current State
 
-Enclagent is now maintained as a standalone single-runtime repository.
+Enclagent is maintained as a standalone single-runtime repository with IronClaw-lineage runtime foundations.
 
-Completed cleanup:
+Completed platform-direction updates:
 
-- Removed legacy external app trees.
-- Removed duplicate upstream snapshot tree.
-- Removed optional npm SDK wrapper from this repository.
-- Consolidated docs and scripts around Enclagent-only runtime behavior.
+- Re-anchored directives from Hyperliquid-first to verifiable-core + module suite.
+- Added Core-8 module catalog and module state APIs.
+- Added org workspace and membership control APIs.
+- Added platform schema migrations for org/module/provisioning/skill-fork lineage.
+- Added module-aware inference route enforcement in gateway chat path.
+- Added EigenDA frontdoor domain profile and addon-facing contract surface.
 
 ## Runtime Scope
 
 - Rust runtime and CLI
 - Embedded web gateway
 - Embedded frontdoor API and static UI
-- Hyperliquid execution tooling
+- Module catalog/state and org APIs
 - Deterministic intent/receipt/verification pipeline
+- Optional addon modules:
+  - Hyperliquid execution addon
+  - EigenDA data-availability addon
 
 ## Deployment Scope
 
@@ -26,4 +31,4 @@ Completed cleanup:
 
 ## Remaining Rule
 
-Enclagent remains paper-first with explicit policy gates for any live execution path.
+Enclagent remains verifiability-first with strict policy gates and mandatory verification fallback posture for stable release readiness.

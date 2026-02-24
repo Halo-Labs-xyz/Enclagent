@@ -9,7 +9,7 @@ Paste this document or §9 One-Paragraph Brief into another agent session when e
 ## 1. Executive Summary
 
 **Vision: Secure Verifiable Agent Launchpad.**  
-Single product — Enclagent: Hyperliquid-first agent with enclave provisioning, frontdoor (wallet + challenge + config + verify + session), and deterministic intent/receipt/verification lineage. **No separate Next.js apps.** The Rust binary is the runtime and the gateway; it serves the frontdoor API and static UI.
+Single product — Enclagent: verifiable-core modular agent platform with enclave provisioning, frontdoor (wallet + challenge + config + verify + session), and deterministic intent/receipt/verification lineage. Hyperliquid is an optional addon module, not a core dependency. **No separate Next.js apps.** The Rust binary is the runtime and the gateway; it serves the frontdoor API and static UI.
 
 **Target capabilities (all in-repo, no hyperClaw/ironclaw):**
 - **Generalized config** — FrontdoorUserConfig in Rust (`src/channels/web/types.rs`); single source of truth; placeholders for provisioning.

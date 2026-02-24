@@ -12,14 +12,17 @@ flowchart TB
   end
 
   subgraph control["Control Plane"]
-    router["Agent Loop + Router"]
-    scheduler["Scheduler + Routine Engine"]
-    policy["Policy Engine"]
+    frontdoor["Frontdoor + Provisioning Orchestrator"]
+    org["Org Workspace + Membership APIs"]
+    modules["Module Catalog + State APIs"]
+    router["4-Layer Inference Router"]
+    policy["Policy Guardrail Engine"]
   end
 
   subgraph execution["Execution + Verification"]
-    hl_tool["Hyperliquid Tooling"]
-    verify["Verification Backend + Signed Fallback"]
+    core["General/Developer/Creative/Research/BizOps/Comms Modules"]
+    addons["Optional Addons (Hyperliquid, EigenDA)"]
+    verify["EigenCloud Primary + Signed Fallback"]
     artifacts["Intent / Receipt / Verification Artifacts"]
   end
 
@@ -30,15 +33,20 @@ flowchart TB
   end
 
   repl --> router
+  gateway --> frontdoor
+  gateway --> org
+  gateway --> modules
   gateway --> router
   webhook --> router
   wasm_channels --> router
 
-  router --> scheduler
-  scheduler --> router
+  frontdoor --> org
+  modules --> policy
   router --> policy
-  policy --> hl_tool
-  hl_tool --> artifacts
+  policy --> core
+  policy --> addons
+  core --> artifacts
+  addons --> artifacts
   verify --> artifacts
 
   router <--> memory
@@ -48,7 +56,8 @@ flowchart TB
 
 Core references:
 
+- `src/platform/mod.rs`
 - `src/channels/web/server.rs`
 - `src/channels/web/frontdoor.rs`
+- `src/channels/web/types.rs`
 - `src/agent/intent.rs`
-- `src/tools/hyperliquid.rs`

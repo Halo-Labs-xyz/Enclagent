@@ -3,6 +3,11 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub use crate::platform::{
+    InferenceRouteDecision, ModuleCapability, ModuleManifest, ModuleState, OrgMembership,
+    OrgWorkspace,
+};
+
 // --- Chat ---
 
 #[derive(Debug, Deserialize)]
@@ -686,6 +691,61 @@ pub struct SettingsExportResponse {
     pub settings: std::collections::HashMap<String, serde_json::Value>,
 }
 
+// --- Modules ---
+
+#[derive(Debug, Serialize)]
+pub struct ModuleCatalogResponse {
+    pub modules: Vec<ModuleManifest>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModuleStateResponse {
+    pub modules: Vec<ModuleState>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModuleUpdateResponse {
+    pub module: ModuleState,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModuleConfigUpdateRequest {
+    pub config: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModuleHealthResponse {
+    pub module_id: String,
+    pub enabled: bool,
+    pub status: String,
+    pub checks: serde_json::Value,
+}
+
+// --- Org Workspace ---
+
+#[derive(Debug, Serialize)]
+pub struct OrgCurrentResponse {
+    pub workspace: OrgWorkspace,
+    pub membership: OrgMembership,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrgMembersResponse {
+    pub workspace: OrgWorkspace,
+    pub members: Vec<OrgMembership>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrgInviteRequest {
+    pub member_id: String,
+    pub role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrgRoleUpdateRequest {
+    pub role: String,
+}
+
 // --- Frontdoor Provisioning ---
 
 #[derive(Debug, Serialize)]
@@ -795,7 +855,7 @@ fn default_frontdoor_config_version() -> u32 {
 }
 
 fn default_frontdoor_profile_domain() -> String {
-    "hyperliquid".to_string()
+    "general".to_string()
 }
 
 fn default_frontdoor_verification_backend() -> String {
@@ -852,9 +912,18 @@ pub struct FrontdoorConfigContractResponse {
     pub current_config_version: u32,
     pub supported_config_versions: Vec<u32>,
     pub supported_domains: Vec<String>,
+    pub domain_profiles: Vec<FrontdoorDomainProfile>,
     pub mandatory_steps: Vec<String>,
     pub enums: FrontdoorConfigEnums,
     pub defaults: FrontdoorConfigDefaults,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorDomainProfile {
+    pub domain: String,
+    pub default_modules: Vec<String>,
+    pub required_fields: Vec<String>,
+    pub optional_fields: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]

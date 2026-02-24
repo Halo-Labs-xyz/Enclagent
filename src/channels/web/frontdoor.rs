@@ -23,8 +23,9 @@ use uuid::Uuid;
 use crate::channels::web::types::{
     FrontdoorBootstrapResponse, FrontdoorChallengeRequest, FrontdoorChallengeResponse,
     FrontdoorConfigContractResponse, FrontdoorConfigDefaults, FrontdoorConfigEnums,
-    FrontdoorSessionResponse, FrontdoorSuggestConfigRequest, FrontdoorSuggestConfigResponse,
-    FrontdoorUserConfig, FrontdoorVerifyRequest, FrontdoorVerifyResponse,
+    FrontdoorDomainProfile, FrontdoorSessionResponse, FrontdoorSuggestConfigRequest,
+    FrontdoorSuggestConfigResponse, FrontdoorUserConfig, FrontdoorVerifyRequest,
+    FrontdoorVerifyResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -148,7 +149,17 @@ impl FrontdoorService {
             contract_id: "enclagent.frontdoor.launchpad".to_string(),
             current_config_version: FRONTDOOR_CURRENT_CONFIG_VERSION,
             supported_config_versions: FRONTDOOR_SUPPORTED_CONFIG_VERSIONS.to_vec(),
-            supported_domains: vec!["hyperliquid".to_string()],
+            supported_domains: vec![
+                "general".to_string(),
+                "developer".to_string(),
+                "creative".to_string(),
+                "research".to_string(),
+                "business_ops".to_string(),
+                "communications".to_string(),
+                "hyperliquid".to_string(),
+                "eigenda".to_string(),
+            ],
+            domain_profiles: frontdoor_domain_profiles(),
             mandatory_steps: mandatory_frontdoor_steps(),
             enums: FrontdoorConfigEnums {
                 hyperliquid_network: vec!["testnet".to_string(), "mainnet".to_string()],
@@ -183,7 +194,7 @@ impl FrontdoorService {
                 ],
             },
             defaults: FrontdoorConfigDefaults {
-                profile_domain: "hyperliquid".to_string(),
+                profile_domain: "general".to_string(),
                 hyperliquid_network: "testnet".to_string(),
                 paper_live_policy: "paper_only".to_string(),
                 request_timeout_ms: 10_000,
@@ -220,7 +231,7 @@ impl FrontdoorService {
         let domain = normalize_domain_name(
             req.domain
                 .as_deref()
-                .unwrap_or("hyperliquid")
+                .unwrap_or("general")
                 .trim()
                 .to_ascii_lowercase()
                 .as_str(),
@@ -1081,6 +1092,164 @@ fn mandatory_frontdoor_steps() -> Vec<String> {
     ]
 }
 
+fn frontdoor_domain_profiles() -> Vec<FrontdoorDomainProfile> {
+    let core_modules = vec![
+        "general".to_string(),
+        "developer".to_string(),
+        "creative".to_string(),
+        "research".to_string(),
+        "business_ops".to_string(),
+        "communications".to_string(),
+    ];
+
+    vec![
+        FrontdoorDomainProfile {
+            domain: "general".to_string(),
+            default_modules: core_modules.clone(),
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "verification_eigencloud_auth_scheme".to_string(),
+                "verification_eigencloud_timeout_ms".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec![
+                "domain_overrides".to_string(),
+                "inference_summary".to_string(),
+                "inference_confidence".to_string(),
+                "inference_warnings".to_string(),
+                "enable_memory".to_string(),
+            ],
+        },
+        FrontdoorDomainProfile {
+            domain: "developer".to_string(),
+            default_modules: core_modules.clone(),
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec!["domain_overrides".to_string(), "enable_memory".to_string()],
+        },
+        FrontdoorDomainProfile {
+            domain: "creative".to_string(),
+            default_modules: core_modules.clone(),
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec!["domain_overrides".to_string(), "enable_memory".to_string()],
+        },
+        FrontdoorDomainProfile {
+            domain: "research".to_string(),
+            default_modules: core_modules.clone(),
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec!["domain_overrides".to_string(), "enable_memory".to_string()],
+        },
+        FrontdoorDomainProfile {
+            domain: "business_ops".to_string(),
+            default_modules: core_modules.clone(),
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec!["domain_overrides".to_string(), "enable_memory".to_string()],
+        },
+        FrontdoorDomainProfile {
+            domain: "communications".to_string(),
+            default_modules: core_modules,
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec!["domain_overrides".to_string(), "enable_memory".to_string()],
+        },
+        FrontdoorDomainProfile {
+            domain: "hyperliquid".to_string(),
+            default_modules: vec![
+                "general".to_string(),
+                "business_ops".to_string(),
+                "research".to_string(),
+                "communications".to_string(),
+                "hyperliquid_addon".to_string(),
+            ],
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "hyperliquid_network".to_string(),
+                "paper_live_policy".to_string(),
+                "max_position_size_usd".to_string(),
+                "leverage_cap".to_string(),
+                "max_allocation_usd".to_string(),
+                "per_trade_notional_cap_usd".to_string(),
+                "max_leverage".to_string(),
+                "max_slippage_bps".to_string(),
+                "symbol_allowlist".to_string(),
+                "custody_mode".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec![
+                "operator_wallet_address".to_string(),
+                "user_wallet_address".to_string(),
+                "vault_address".to_string(),
+                "eigencloud_auth_key".to_string(),
+                "verification_fallback_chain_path".to_string(),
+            ],
+        },
+        FrontdoorDomainProfile {
+            domain: "eigenda".to_string(),
+            default_modules: vec![
+                "general".to_string(),
+                "research".to_string(),
+                "business_ops".to_string(),
+                "communications".to_string(),
+                "eigenda_addon".to_string(),
+            ],
+            required_fields: vec![
+                "config_version".to_string(),
+                "profile_domain".to_string(),
+                "profile_name".to_string(),
+                "gateway_auth_key".to_string(),
+                "verification_backend".to_string(),
+                "accept_terms".to_string(),
+            ],
+            optional_fields: vec![
+                "domain_overrides".to_string(),
+                "enable_memory".to_string(),
+                "verification_fallback_chain_path".to_string(),
+            ],
+        },
+    ]
+}
+
 fn default_frontdoor_user_config(
     wallet: &str,
     gateway_auth_key: Option<&str>,
@@ -1354,10 +1523,10 @@ fn infer_symbols_from_intent(intent: &str) -> Vec<String> {
                 }
             }
         };
-        if let Some(symbol) = mapped {
-            if !symbols.iter().any(|v: &String| v == symbol) {
-                symbols.push(symbol.to_string());
-            }
+        if let Some(symbol) = mapped
+            && !symbols.iter().any(|v: &String| v == symbol)
+        {
+            symbols.push(symbol.to_string());
         }
     }
     symbols
@@ -1380,10 +1549,12 @@ fn normalize_suggested_config(
     match normalize_domain_name(&config.profile_domain) {
         Ok(domain) => config.profile_domain = domain,
         Err(_) => {
-            config.profile_domain = "hyperliquid".to_string();
-            assumptions.push("Normalized invalid profile_domain to hyperliquid.".to_string());
+            config.profile_domain = "general".to_string();
+            assumptions.push("Normalized invalid profile_domain to general.".to_string());
         }
     }
+
+    let hyperliquid_profile = config.profile_domain == "hyperliquid";
 
     if config.profile_name.trim().is_empty() {
         config.profile_name = "launchpad_profile".to_string();
@@ -1392,35 +1563,44 @@ fn normalize_suggested_config(
         config.profile_name = config.profile_name.chars().take(64).collect();
     }
 
-    if config.hyperliquid_network != "mainnet" && config.hyperliquid_network != "testnet" {
+    if hyperliquid_profile {
+        if config.hyperliquid_network != "mainnet" && config.hyperliquid_network != "testnet" {
+            config.hyperliquid_network = "testnet".to_string();
+        }
+        if !matches!(
+            config.paper_live_policy.as_str(),
+            "paper_only" | "paper_first" | "live_allowed"
+        ) {
+            config.paper_live_policy = "paper_only".to_string();
+        }
+    } else {
         config.hyperliquid_network = "testnet".to_string();
-    }
-    if !matches!(
-        config.paper_live_policy.as_str(),
-        "paper_only" | "paper_first" | "live_allowed"
-    ) {
         config.paper_live_policy = "paper_only".to_string();
+        config.symbol_allowlist.clear();
+        config.symbol_denylist.clear();
     }
 
     config.request_timeout_ms = config.request_timeout_ms.clamp(1_000, 120_000);
     config.max_retries = config.max_retries.min(10);
     config.retry_backoff_ms = config.retry_backoff_ms.min(30_000);
 
-    config.max_position_size_usd = config.max_position_size_usd.max(1);
-    config.leverage_cap = config.leverage_cap.clamp(1, 20);
-    config.max_allocation_usd = config.max_allocation_usd.max(1);
-    config.per_trade_notional_cap_usd = config.per_trade_notional_cap_usd.max(1);
-    if config.per_trade_notional_cap_usd > config.max_allocation_usd {
-        config.per_trade_notional_cap_usd = config.max_allocation_usd;
-    }
-    config.max_leverage = config.max_leverage.clamp(1, 20);
-    if config.max_leverage > config.leverage_cap {
-        config.max_leverage = config.leverage_cap;
-    }
-    config.max_slippage_bps = config.max_slippage_bps.clamp(1, 5_000);
+    if hyperliquid_profile {
+        config.max_position_size_usd = config.max_position_size_usd.max(1);
+        config.leverage_cap = config.leverage_cap.clamp(1, 20);
+        config.max_allocation_usd = config.max_allocation_usd.max(1);
+        config.per_trade_notional_cap_usd = config.per_trade_notional_cap_usd.max(1);
+        if config.per_trade_notional_cap_usd > config.max_allocation_usd {
+            config.per_trade_notional_cap_usd = config.max_allocation_usd;
+        }
+        config.max_leverage = config.max_leverage.clamp(1, 20);
+        if config.max_leverage > config.leverage_cap {
+            config.max_leverage = config.leverage_cap;
+        }
+        config.max_slippage_bps = config.max_slippage_bps.clamp(1, 5_000);
 
-    if config.symbol_allowlist.is_empty() {
-        config.symbol_allowlist = vec!["BTC".to_string(), "ETH".to_string()];
+        if config.symbol_allowlist.is_empty() {
+            config.symbol_allowlist = vec!["BTC".to_string(), "ETH".to_string()];
+        }
     }
     if !matches!(
         config.custody_mode.as_str(),
@@ -1479,7 +1659,8 @@ fn normalize_suggested_config(
     config.verification_eigencloud_timeout_ms =
         config.verification_eigencloud_timeout_ms.clamp(1, 120_000);
 
-    if config.hyperliquid_network == "mainnet"
+    if hyperliquid_profile
+        && config.hyperliquid_network == "mainnet"
         && config.paper_live_policy == "live_allowed"
         && config.max_position_size_usd > 1_000_000
     {
@@ -1501,7 +1682,8 @@ fn validate_user_config(config: &FrontdoorUserConfig) -> Result<(), String> {
         ));
     }
 
-    normalize_domain_name(&config.profile_domain)?;
+    let domain = normalize_domain_name(&config.profile_domain)?;
+    let hyperliquid_profile = domain == "hyperliquid";
     if config.domain_overrides.len() > 32 {
         return Err("domain_overrides must include at most 32 keys".to_string());
     }
@@ -1544,70 +1726,75 @@ fn validate_user_config(config: &FrontdoorUserConfig) -> Result<(), String> {
         return Err("profile_name must be <= 64 chars".to_string());
     }
 
-    let network = config.hyperliquid_network.trim().to_ascii_lowercase();
-    if network != "testnet" && network != "mainnet" {
-        return Err("hyperliquid_network must be testnet or mainnet".to_string());
-    }
+    if hyperliquid_profile {
+        let network = config.hyperliquid_network.trim().to_ascii_lowercase();
+        if network != "testnet" && network != "mainnet" {
+            return Err("hyperliquid_network must be testnet or mainnet".to_string());
+        }
 
-    let policy = config.paper_live_policy.trim().to_ascii_lowercase();
-    if policy != "paper_only" && policy != "paper_first" && policy != "live_allowed" {
-        return Err(
-            "paper_live_policy must be paper_only, paper_first, or live_allowed".to_string(),
-        );
-    }
-    if network == "mainnet" && policy == "live_allowed" && config.max_position_size_usd > 1_000_000
-    {
-        return Err(
-            "mainnet live_allowed sessions require max_position_size_usd <= 1000000".to_string(),
-        );
-    }
+        let policy = config.paper_live_policy.trim().to_ascii_lowercase();
+        if policy != "paper_only" && policy != "paper_first" && policy != "live_allowed" {
+            return Err(
+                "paper_live_policy must be paper_only, paper_first, or live_allowed".to_string(),
+            );
+        }
+        if network == "mainnet"
+            && policy == "live_allowed"
+            && config.max_position_size_usd > 1_000_000
+        {
+            return Err(
+                "mainnet live_allowed sessions require max_position_size_usd <= 1000000"
+                    .to_string(),
+            );
+        }
 
-    if let Some(api) = config.hyperliquid_api_base_url.as_deref() {
-        validate_optional_url(api, &["http", "https"], "hyperliquid_api_base_url")?;
-    }
-    if let Some(ws) = config.hyperliquid_ws_url.as_deref() {
-        validate_optional_url(ws, &["ws", "wss"], "hyperliquid_ws_url")?;
-    }
-    if config.request_timeout_ms < 1_000 || config.request_timeout_ms > 120_000 {
-        return Err("request_timeout_ms must be between 1000 and 120000".to_string());
-    }
-    if config.max_retries > 10 {
-        return Err("max_retries must be between 0 and 10".to_string());
-    }
-    if config.retry_backoff_ms > 30_000 {
-        return Err("retry_backoff_ms must be <= 30000".to_string());
-    }
+        if let Some(api) = config.hyperliquid_api_base_url.as_deref() {
+            validate_optional_url(api, &["http", "https"], "hyperliquid_api_base_url")?;
+        }
+        if let Some(ws) = config.hyperliquid_ws_url.as_deref() {
+            validate_optional_url(ws, &["ws", "wss"], "hyperliquid_ws_url")?;
+        }
+        if config.request_timeout_ms < 1_000 || config.request_timeout_ms > 120_000 {
+            return Err("request_timeout_ms must be between 1000 and 120000".to_string());
+        }
+        if config.max_retries > 10 {
+            return Err("max_retries must be between 0 and 10".to_string());
+        }
+        if config.retry_backoff_ms > 30_000 {
+            return Err("retry_backoff_ms must be <= 30000".to_string());
+        }
 
-    if config.max_position_size_usd == 0 {
-        return Err("max_position_size_usd must be > 0".to_string());
-    }
-    if config.leverage_cap == 0 || config.leverage_cap > 20 {
-        return Err("leverage_cap must be between 1 and 20".to_string());
-    }
+        if config.max_position_size_usd == 0 {
+            return Err("max_position_size_usd must be > 0".to_string());
+        }
+        if config.leverage_cap == 0 || config.leverage_cap > 20 {
+            return Err("leverage_cap must be between 1 and 20".to_string());
+        }
 
-    if config.max_allocation_usd == 0 {
-        return Err("max_allocation_usd must be > 0".to_string());
-    }
-    if config.per_trade_notional_cap_usd == 0 {
-        return Err("per_trade_notional_cap_usd must be > 0".to_string());
-    }
-    if config.per_trade_notional_cap_usd > config.max_allocation_usd {
-        return Err("per_trade_notional_cap_usd must be <= max_allocation_usd".to_string());
-    }
-    if config.max_leverage == 0 || config.max_leverage > 20 {
-        return Err("max_leverage must be between 1 and 20".to_string());
-    }
-    if config.max_leverage > config.leverage_cap {
-        return Err("max_leverage must be <= leverage_cap".to_string());
-    }
-    if config.max_slippage_bps == 0 || config.max_slippage_bps > 5_000 {
-        return Err("max_slippage_bps must be between 1 and 5000".to_string());
-    }
+        if config.max_allocation_usd == 0 {
+            return Err("max_allocation_usd must be > 0".to_string());
+        }
+        if config.per_trade_notional_cap_usd == 0 {
+            return Err("per_trade_notional_cap_usd must be > 0".to_string());
+        }
+        if config.per_trade_notional_cap_usd > config.max_allocation_usd {
+            return Err("per_trade_notional_cap_usd must be <= max_allocation_usd".to_string());
+        }
+        if config.max_leverage == 0 || config.max_leverage > 20 {
+            return Err("max_leverage must be between 1 and 20".to_string());
+        }
+        if config.max_leverage > config.leverage_cap {
+            return Err("max_leverage must be <= leverage_cap".to_string());
+        }
+        if config.max_slippage_bps == 0 || config.max_slippage_bps > 5_000 {
+            return Err("max_slippage_bps must be between 1 and 5000".to_string());
+        }
 
-    let allowlist = normalize_symbols(&config.symbol_allowlist, "symbol_allowlist", true)?;
-    let denylist = normalize_symbols(&config.symbol_denylist, "symbol_denylist", false)?;
-    if !allowlist.is_disjoint(&denylist) {
-        return Err("symbol_allowlist and symbol_denylist must not overlap".to_string());
+        let allowlist = normalize_symbols(&config.symbol_allowlist, "symbol_allowlist", true)?;
+        let denylist = normalize_symbols(&config.symbol_denylist, "symbol_denylist", false)?;
+        if !allowlist.is_disjoint(&denylist) {
+            return Err("symbol_allowlist and symbol_denylist must not overlap".to_string());
+        }
     }
 
     let custody_mode = config.custody_mode.trim().to_ascii_lowercase();

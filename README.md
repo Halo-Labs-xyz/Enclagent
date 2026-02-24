@@ -5,7 +5,7 @@
 <h1 align="center">Enclagent</h1>
 
 <p align="center">
-  <strong>Verifiable Hyperliquid agent runtime with embedded gateway and frontdoor.</strong>
+  <strong>Verifiable agent runtime with embedded gateway, frontdoor, and modular addons.</strong>
 </p>
 
 ## Overview
@@ -16,7 +16,8 @@ Enclagent is a single-product Rust runtime.
 - One embedded web gateway (`/api/*`)
 - One frontdoor contract (`/api/frontdoor/*`)
 - Deterministic intent/receipt/verification lineage
-- Paper-trading default with explicit policy gates for live actions
+- Core-8 module suite with optional Hyperliquid and EigenDA addons
+- Explicit policy gates for live trading actions when trading addon is enabled
 
 No separate Next.js applications are part of this repository.
 
