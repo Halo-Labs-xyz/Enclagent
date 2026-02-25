@@ -286,10 +286,6 @@ impl FrontdoorService {
     ) -> Result<FrontdoorChallengeResponse, String> {
         let wallet = normalize_wallet_address(&req.wallet_address)
             .ok_or_else(|| "wallet_address must be a 0x-prefixed 40-hex address".to_string())?;
-        if self.config.require_privy && req.privy_user_id.as_deref().unwrap_or("").trim().is_empty()
-        {
-            return Err("privy_user_id is required".to_string());
-        }
 
         let mut state = self.state.write().await;
         purge_expired_sessions(&mut state);
@@ -300,9 +296,9 @@ impl FrontdoorService {
         let now = Utc::now();
         let expires_at = now + chrono::Duration::seconds(self.config.session_ttl_secs as i64);
         let chain_id = req.chain_id.unwrap_or(1);
-        let privy = req.privy_user_id.as_deref().unwrap_or("unlinked");
+        let privy = req.privy_user_id.as_deref().unwrap_or("wallet_only");
         let message = format!(
-            "Enclagent Enclave Authorization\nWallet: {wallet}\nPrivy User: {privy}\nChain ID: {chain_id}\nSession ID: {session_id}\nVersion: v{version}\nNonce: {nonce}\nIssued At: {}\n\nSign this message to authorize provisioning of your dedicated Enclagent enclave.",
+            "Enclagent Gasless Authorization Transaction\nWallet: {wallet}\nPrivy Link: {privy}\nChain ID: {chain_id}\nSession ID: {session_id}\nVersion: v{version}\nNonce: {nonce}\nIssued At: {}\n\nSign this gasless authorization transaction to verify wallet control and start provisioning your dedicated Enclagent enclave.",
             now.to_rfc3339()
         );
 
@@ -317,7 +313,7 @@ impl FrontdoorService {
             version,
             config: None,
             status: SessionStatus::AwaitingSignature,
-            detail: "Waiting for signed authorization.".to_string(),
+            detail: "Waiting for gasless authorization signature.".to_string(),
             instance_url: None,
             verify_url: None,
             eigen_app_id: None,
@@ -364,30 +360,10 @@ impl FrontdoorService {
                 return Err("wallet_address does not match challenge session".to_string());
             }
             if self.config.require_privy {
-                let provided = req.privy_user_id.as_deref().unwrap_or("").trim();
-                if provided.is_empty() {
-                    return Err("privy_user_id is required".to_string());
-                }
                 let expected = session.privy_user_id.as_deref().unwrap_or("").trim();
-                if !expected.is_empty() && expected != provided {
+                let provided = req.privy_user_id.as_deref().unwrap_or("").trim();
+                if !expected.is_empty() && !provided.is_empty() && expected != provided {
                     return Err("privy_user_id mismatch".to_string());
-                }
-                if req
-                    .privy_identity_token
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim()
-                    .is_empty()
-                    && req
-                        .privy_access_token
-                        .as_deref()
-                        .unwrap_or("")
-                        .trim()
-                        .is_empty()
-                {
-                    return Err(
-                        "privy_identity_token or privy_access_token is required".to_string()
-                    );
                 }
             }
 
@@ -1083,9 +1059,8 @@ fn message_matches(candidate: &str, expected: &str) -> bool {
 
 fn mandatory_frontdoor_steps() -> Vec<String> {
     vec![
-        "connect_wallet".to_string(),
-        "authenticate_with_privy_siwe".to_string(),
-        "sign_authorization_message".to_string(),
+        "connect_wallet_with_privy".to_string(),
+        "sign_gasless_authorization_transaction".to_string(),
         "configure_runtime_profile_and_risk".to_string(),
         "set_gateway_auth_key".to_string(),
         "accept_risk_and_terms".to_string(),
@@ -2131,6 +2106,73 @@ mod tests {
             );
             assert_eq!(ready.wallet_address, wallet);
             assert_eq!(ready.profile_name.as_deref(), Some("demo_profile"));
+        });
+    }
+
+    #[test]
+    fn frontdoor_privy_mode_accepts_wallet_signature_without_siwe_tokens() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let tmp = tempdir().expect("tempdir");
+            let store_path = tmp.path().join("wallet_sessions.json");
+            let service = FrontdoorService::new_for_tests(
+                FrontdoorConfig {
+                    require_privy: true,
+                    privy_app_id: Some("app_123".to_string()),
+                    privy_client_id: None,
+                    provision_command: None,
+                    default_instance_url: Some(
+                        "https://session.example/gateway?token=demo".to_string(),
+                    ),
+                    verify_app_base_url: None,
+                    session_ttl_secs: 900,
+                    poll_interval_ms: 100,
+                },
+                store_path,
+            );
+
+            let private_key = decode_hex_prefixed(
+                "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            )
+            .expect("private key");
+            let signing_key = SigningKey::from_slice(&private_key).expect("signing key");
+            let wallet =
+                ethereum_address_from_verifying_key(signing_key.verifying_key()).expect("wallet");
+
+            let challenge = service
+                .create_challenge(FrontdoorChallengeRequest {
+                    wallet_address: wallet.clone(),
+                    privy_user_id: Some(format!("wallet:{wallet}")),
+                    chain_id: Some(1),
+                })
+                .await
+                .expect("challenge");
+
+            let prehash = eip191_personal_sign_hash(&challenge.message);
+            let (sig, recid) = signing_key
+                .sign_prehash_recoverable(&prehash)
+                .expect("sign challenge");
+            let mut sig_bytes = sig.to_bytes().to_vec();
+            sig_bytes.push(recid.to_byte() + 27);
+            let signature = format!("0x{}", encode_hex_lower(&sig_bytes));
+
+            service
+                .clone()
+                .verify_and_start(FrontdoorVerifyRequest {
+                    session_id: challenge.session_id,
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    privy_identity_token: None,
+                    privy_access_token: None,
+                    message: challenge.message,
+                    signature,
+                    config: sample_user_config(&wallet),
+                })
+                .await
+                .expect("verify and start");
         });
     }
 

@@ -6,8 +6,8 @@ This document defines the user-facing launch flow for the shared Enclagent gatew
 
 Expose a production entrypoint where users:
 
-1. Connect wallet (Privy-linked EVM wallet flow).
-2. Sign a mandatory authorization challenge.
+1. Connect wallet (Privy-mode EVM wallet flow, no SIWE token handshake).
+2. Sign a mandatory gasless authorization challenge.
 3. Complete required risk/runtime configuration.
 4. Trigger per-user enclave provisioning.
 5. Get redirected to their personal instance URL when ready.
@@ -207,17 +207,15 @@ Additional enforcement:
 - `POST /api/frontdoor/verify` cryptographically recovers signer address from the EIP-191 signed challenge and rejects mismatches.
 - `POST /api/frontdoor/suggest-config` always returns server-validated suggestions that pass the same policy checks used by verify/provision.
 
-## SIWE Compatibility Notes
+## Gasless Signature Notes
 
-Frontdoor SIWE auth now uses defensive client-side retries to reduce wallet/provider incompatibilities:
+Frontdoor launch authentication is wallet-signature based and does not require SIWE identity/access tokens.
 
-- Resolves SIWE domain from `window.location.hostname` (fallback `window.location.host`).
-- Tries wallet descriptors with both `eip155:<chainId>` and numeric `<chainId>` formats.
-- Signs with `personal_sign` across both payload encodings (UTF-8 hex and plain text) and both argument orders (`[message, address]` and `[address, message]`).
-- Clears stale Privy sessions before re-auth when the active Privy user does not own the connected wallet.
+- The launch proof uses an EIP-191 personal-sign message labeled as a gasless authorization transaction.
+- Client signing retries include both payload encodings (UTF-8 hex and plain text) and both parameter orders (`[message, address]` and `[address, message]`) for wallet-provider compatibility.
+- Server-side verification recovers the signer wallet address from the signature and rejects mismatches.
 
-If users still see `Invalid SIWE message and/or signature`, verify:
+If users still see signature verification errors:
 
-- Privy app allowlist includes the exact gateway domain in use.
-- The connected wallet account matches the expected signer account.
-- Browser wallet extension is not rewriting/transforming SIWE messages.
+- Confirm the connected wallet account matches the challenge wallet address.
+- Confirm browser wallet extensions are not rewriting the signed payload.

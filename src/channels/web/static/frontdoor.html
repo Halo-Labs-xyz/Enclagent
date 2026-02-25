@@ -35,7 +35,7 @@
     <section class="panel" id="wallet-panel">
       <h2>1. Identity Authentication</h2>
       <p class="section-copy">
-        Connect your wallet and complete Privy authentication when required by gateway policy.
+        Connect your wallet in Privy mode, then sign a gasless authorization transaction to verify wallet control.
       </p>
       <div class="field-grid">
         <label>
@@ -50,15 +50,15 @@
       <div class="field-grid">
         <label>
           <span>Privy User ID</span>
-          <input id="privy-user-id" type="text" placeholder="Filled after SIWE authentication" readonly>
+          <input id="privy-user-id" type="text" placeholder="Wallet-linked identifier" readonly>
         </label>
         <label>
           <span>Privy Auth Status</span>
-          <input id="privy-auth-status" type="text" value="Not authenticated" readonly>
+          <input id="privy-auth-status" type="text" value="Not connected" readonly>
         </label>
       </div>
       <div class="actions">
-        <button id="connect-wallet-btn" class="btn-primary">Connect Wallet And Authenticate</button>
+        <button id="connect-wallet-btn" class="btn-primary">Connect Wallet With Privy</button>
       </div>
       <div class="error-text" id="wallet-error"></div>
     </section>

@@ -1,5 +1,3 @@
-const PRIVY_SDK_URL = "https://esm.sh/@privy-io/js-sdk-core@0.55.0";
-
 const state = {
   bootstrap: null,
   walletAddress: "",
@@ -11,7 +9,6 @@ const state = {
   privyUserId: "",
   privyIdentityToken: "",
   privyAccessToken: "",
-  privyClient: null,
   ethereumProvider: null,
 };
 
@@ -61,10 +58,10 @@ async function main() {
       return;
     }
     if (bootstrap.require_privy) {
-      el.connectWalletBtn.textContent = "Connect Wallet And Authenticate With Privy";
+      el.connectWalletBtn.textContent = "Connect Wallet With Privy";
     }
     setBootstrapStatus(
-      "Gateway ready. Complete identity auth, verify policy, then sign launch intent.",
+      "Gateway ready. Connect wallet, review policy, then sign a gasless authorization transaction.",
       "ok"
     );
     syncWalletLinkedInputs(false);
@@ -90,7 +87,7 @@ function bindEvents() {
       await connectWalletAndPrivy();
     } catch (err) {
       el.walletError.textContent = String(err.message || err);
-      setPrivyStatus("Authentication failed");
+      setPrivyStatus("Wallet connect failed");
     }
   });
 
@@ -148,17 +145,6 @@ function bindEvents() {
       el.configError.textContent = "Connect wallet first.";
       return;
     }
-    if (state.bootstrap && state.bootstrap.require_privy) {
-      if (!state.privyUserId) {
-        el.configError.textContent = "Privy authentication is required.";
-        return;
-      }
-      if (!state.privyIdentityToken && !state.privyAccessToken) {
-        el.configError.textContent = "Privy token unavailable. Re-authenticate.";
-        return;
-      }
-    }
-
     if (!state.bootstrap || !state.bootstrap.enabled) {
       el.configError.textContent = "Frontdoor flow is not enabled.";
       return;
@@ -179,7 +165,7 @@ function bindEvents() {
       state.sessionId = challenge.session_id;
       state.challengeMessage = challenge.message;
       showLoadingPanel();
-      advanceLoading("Challenge created. Awaiting wallet signature...", 20);
+      advanceLoading("Gasless authorization prepared. Awaiting wallet signature...", 20);
 
       const signature = await signMessage(challenge.message, state.walletAddress);
       advanceLoading("Signature accepted. Starting enclave provisioning...", 38);
@@ -239,117 +225,26 @@ async function connectWalletAndPrivy() {
   syncWalletLinkedInputs(true);
 
   if (state.bootstrap && state.bootstrap.require_privy) {
-    setPrivyStatus("Authenticating with Privy SIWE...");
-    await authenticateWithPrivySiwe();
-    setPrivyStatus("Authenticated");
+    state.privyUserId = buildPrivyWalletHandle(state.walletAddress);
+    state.privyIdentityToken = "";
+    state.privyAccessToken = "";
+    el.privyUserId.value = state.privyUserId;
+    setPrivyStatus("Wallet connected (Privy mode)");
   } else {
-    setPrivyStatus("Privy optional");
+    state.privyUserId = "";
+    state.privyIdentityToken = "";
+    state.privyAccessToken = "";
+    el.privyUserId.value = "";
+    setPrivyStatus("Wallet connected");
   }
 }
 
-async function authenticateWithPrivySiwe() {
-  const privy = await getPrivyClient();
-  const chainNumber = parseChainId(state.chainId);
-  if (!chainNumber) {
-    throw new Error("Chain ID unavailable for Privy SIWE auth.");
+function buildPrivyWalletHandle(walletAddress) {
+  const normalized = normalizeOptionalWallet(walletAddress);
+  if (!normalized) {
+    return "";
   }
-
-  const existing = await privy.user.get().catch(() => null);
-  if (existing && existing.user && userHasWallet(existing.user, state.walletAddress)) {
-    await hydratePrivyState(existing.user, privy);
-    return;
-  }
-
-  if (existing && existing.user) {
-    // Avoid stale session/user linkage mismatches before SIWE login.
-    await privy.auth.logout().catch(() => null);
-  }
-
-  const domain = resolveSiweDomain();
-  const uri = window.location.origin;
-  const walletCandidates = buildSiweWalletCandidates(chainNumber);
-  let lastError = null;
-  let user = null;
-
-  for (const wallet of walletCandidates) {
-    try {
-      const init = await privy.auth.siwe.init(wallet, domain, uri);
-      const login = await loginWithSiweSignatureRetries(privy, wallet, init.message);
-      user = login && login.user ? login.user : null;
-      if (user) {
-        break;
-      }
-    } catch (err) {
-      lastError = err;
-      if (!isInvalidSiweError(err)) {
-        throw err;
-      }
-    }
-  }
-
-  if (!user) {
-    if (lastError) {
-      throw lastError;
-    }
-    throw new Error("Privy SIWE authentication failed.");
-  }
-
-  await hydratePrivyState(user, privy);
-}
-
-async function hydratePrivyState(user, privy) {
-  if (!user || !user.id) {
-    throw new Error("Privy SIWE authentication did not return a user id.");
-  }
-  state.privyUserId = user.id;
-  el.privyUserId.value = user.id;
-  const [identityToken, accessToken] = await Promise.all([
-    privy.getIdentityToken().catch(() => null),
-    privy.getAccessToken().catch(() => null),
-  ]);
-  state.privyIdentityToken = identityToken || "";
-  state.privyAccessToken = accessToken || "";
-  if (!state.privyIdentityToken && !state.privyAccessToken) {
-    throw new Error("Privy token retrieval failed. Please retry authentication.");
-  }
-}
-
-async function getPrivyClient() {
-  if (state.privyClient) {
-    return state.privyClient;
-  }
-  if (!state.bootstrap || !state.bootstrap.privy_app_id) {
-    throw new Error("Privy app configuration missing.");
-  }
-
-  const sdk = await import(PRIVY_SDK_URL);
-  const Privy = sdk.default;
-  const LocalStorage = sdk.LocalStorage;
-  const client = new Privy({
-    appId: state.bootstrap.privy_app_id,
-    clientId: state.bootstrap.privy_client_id || undefined,
-    storage: new LocalStorage(),
-  });
-  await client.initialize();
-  state.privyClient = client;
-  return client;
-}
-
-function inferWalletClientType() {
-  const p = state.ethereumProvider;
-  if (p && p.isMetaMask) return "metamask";
-  if (p && p.isCoinbaseWallet) return "coinbase_wallet";
-  if (p && p.isBraveWallet) return "brave_wallet";
-  return null;
-}
-
-function userHasWallet(user, address) {
-  const linked = Array.isArray(user.linked_accounts) ? user.linked_accounts : [];
-  const target = String(address || "").toLowerCase();
-  return linked.some((item) => {
-    if (!item || item.type !== "wallet" || item.chain_type !== "ethereum") return false;
-    return String(item.address || "").toLowerCase() === target;
-  });
+  return "wallet:" + normalized;
 }
 
 async function signMessage(message, walletAddress) {
@@ -374,44 +269,6 @@ async function signMessage(message, walletAddress) {
   throw new Error(lastErr && lastErr.message ? lastErr.message : "Wallet signature failed.");
 }
 
-function buildSiweWalletCandidates(chainNumber) {
-  const walletClientType = inferWalletClientType();
-  const base = {
-    address: state.walletAddress,
-    connectorType: "injected",
-  };
-
-  const candidates = [
-    Object.assign({}, base, {
-      chainId: "eip155:" + String(chainNumber),
-      walletClientType: walletClientType || undefined,
-    }),
-    Object.assign({}, base, {
-      chainId: String(chainNumber),
-      walletClientType: walletClientType || undefined,
-    }),
-    Object.assign({}, base, {
-      chainId: "eip155:" + String(chainNumber),
-      walletClientType: undefined,
-      connectorType: undefined,
-    }),
-  ];
-
-  const deduped = [];
-  const seen = new Set();
-  for (const wallet of candidates) {
-    const key = JSON.stringify({
-      chainId: wallet.chainId,
-      walletClientType: wallet.walletClientType || "",
-      connectorType: wallet.connectorType || "",
-    });
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(wallet);
-  }
-  return deduped;
-}
-
 function buildPersonalSignParamAttempts(message, address) {
   const hexMessage = toHexUtf8(message);
   const msg = String(message || "");
@@ -422,49 +279,6 @@ function buildPersonalSignParamAttempts(message, address) {
     [wallet, hexMessage],
     [wallet, msg],
   ];
-}
-
-async function loginWithSiweSignatureRetries(privy, wallet, message) {
-  const signingAttempts = buildPersonalSignParamAttempts(message, state.walletAddress);
-  let lastErr = null;
-
-  for (const params of signingAttempts) {
-    try {
-      const signature = await state.ethereumProvider.request({
-        method: "personal_sign",
-        params,
-      });
-      if (!signature || typeof signature !== "string") {
-        continue;
-      }
-      return await privy.auth.siwe.loginWithSiwe(signature, wallet, message);
-    } catch (err) {
-      lastErr = err;
-      if (!isInvalidSiweError(err)) {
-        throw err;
-      }
-    }
-  }
-
-  if (lastErr) {
-    throw lastErr;
-  }
-  throw new Error("Invalid SIWE message and/or signature");
-}
-
-function resolveSiweDomain() {
-  const host = String(window.location.hostname || "").trim();
-  if (host) return host;
-  return String(window.location.host || "").trim();
-}
-
-function isInvalidSiweError(err) {
-  const message = String((err && err.message) || err || "").toLowerCase();
-  return (
-    message.includes("invalid siwe message") ||
-    message.includes("invalid siwe") ||
-    message.includes("and/or signature")
-  );
 }
 
 function toHexUtf8(value) {
