@@ -134,6 +134,17 @@ Public (no gateway token required):
 - `POST /api/frontdoor/suggest-config`
 - `POST /api/frontdoor/verify`
 - `GET /api/frontdoor/session/{session_id}`
+- `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>`
+
+Session status/monitor responses include provisioning audit fields:
+
+- `provisioning_source` (`command`, `default_instance_url`, `unconfigured`, `unknown`)
+- `dedicated_instance` (true when command-based per-session provisioning path is used)
+- `launched_on_eigencloud` (heuristic from returned app id/URL surfaces)
+- `verification_backend`
+- `verification_level` (`primary_only`, `primary_plus_signed_fallback`, `signed_fallback_only`, etc.)
+- `verification_fallback_enabled`
+- `verification_fallback_require_signed_receipts`
 
 The root UI (`/`) auto-switches to the frontdoor page when frontdoor mode is enabled.
 

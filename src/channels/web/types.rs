@@ -756,6 +756,10 @@ pub struct FrontdoorBootstrapResponse {
     pub privy_app_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privy_client_id: Option<String>,
+    pub provisioning_backend: String,
+    pub dynamic_provisioning_enabled: bool,
+    pub default_instance_url_configured: bool,
+    pub default_instance_looks_eigencloud: bool,
     pub poll_interval_ms: u64,
     pub mandatory_steps: Vec<String>,
 }
@@ -972,6 +976,14 @@ pub struct FrontdoorVerifyResponse {
     pub detail: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct FrontdoorSessionListQuery {
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct FrontdoorSessionResponse {
     pub session_id: String,
@@ -981,6 +993,18 @@ pub struct FrontdoorSessionResponse {
     pub version: u64,
     pub status: String,
     pub detail: String,
+    pub provisioning_source: String,
+    pub dedicated_instance: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_on_eigencloud: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_fallback_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_fallback_require_signed_receipts: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -994,6 +1018,16 @@ pub struct FrontdoorSessionResponse {
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorSessionMonitorResponse {
+    pub generated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_address: Option<String>,
+    pub limit: usize,
+    pub total: usize,
+    pub sessions: Vec<FrontdoorSessionResponse>,
 }
 
 // --- Health ---

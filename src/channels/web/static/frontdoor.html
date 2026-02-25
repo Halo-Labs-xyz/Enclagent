@@ -297,6 +297,34 @@
       </div>
       <div class="error-text" id="loading-error"></div>
     </section>
+
+    <section class="panel" id="monitor-panel">
+      <h2>4. Session Monitoring</h2>
+      <p class="section-copy">
+        Inspect recent sessions for this wallet, including provisioning source, EigenCloud detection, and verification assurance level.
+      </p>
+      <div class="actions">
+        <button id="refresh-monitor-btn" class="btn-secondary" type="button">Refresh Sessions</button>
+      </div>
+      <p class="hint" id="monitor-summary">Connect wallet to load session monitoring.</p>
+      <div class="monitor-table-wrap hidden" id="monitor-table-wrap">
+        <table class="monitor-table">
+          <thead>
+            <tr>
+              <th>Session</th>
+              <th>Status</th>
+              <th>Provisioning</th>
+              <th>EigenCloud</th>
+              <th>Verification</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody id="monitor-table-body"></tbody>
+        </table>
+      </div>
+      <p class="hint" id="monitor-empty">No sessions found for this wallet.</p>
+      <div class="error-text" id="monitor-error"></div>
+    </section>
   </main>
 
   <script src="/frontdoor.js"></script>

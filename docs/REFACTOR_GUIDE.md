@@ -80,6 +80,7 @@ All of these remain in the Rust codebase; no dependency on hyperClaw or frontdoo
   - `POST /api/frontdoor/suggest-config`
   - `POST /api/frontdoor/verify`
   - `GET /api/frontdoor/session/{session_id}`
+  - `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>`
 - **Provisioning placeholders** — Injected as env vars into `GATEWAY_FRONTDOOR_PROVISION_COMMAND`. Full list and semantics: `docs/FRONTDOOR_ENCLAVE_FLOW.md`.
 - **Intent/receipt/verification types** — `src/agent/intent.rs`, `src/tools/hyperliquid.rs`; used in-process. No HTTP contract dependency on hyperClaw.
 

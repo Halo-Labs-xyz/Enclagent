@@ -73,6 +73,7 @@ The embedded gateway serves the canonical frontdoor endpoints:
 - `POST /api/frontdoor/suggest-config`
 - `POST /api/frontdoor/verify`
 - `GET /api/frontdoor/session/{session_id}`
+- `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>`
 
 Static frontdoor assets are under `src/channels/web/static/`.
 

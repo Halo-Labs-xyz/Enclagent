@@ -74,6 +74,29 @@ impl SessionStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ProvisioningSource {
+    Unknown,
+    Command,
+    DefaultInstanceUrl,
+    Unconfigured,
+}
+
+impl ProvisioningSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Command => "command",
+            Self::DefaultInstanceUrl => "default_instance_url",
+            Self::Unconfigured => "unconfigured",
+        }
+    }
+
+    fn dedicated_instance(self) -> bool {
+        matches!(self, Self::Command)
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ProvisioningSession {
     id: Uuid,
@@ -87,6 +110,7 @@ struct ProvisioningSession {
     config: Option<FrontdoorUserConfig>,
     status: SessionStatus,
     detail: String,
+    provisioning_source: ProvisioningSource,
     instance_url: Option<String>,
     verify_url: Option<String>,
     eigen_app_id: Option<String>,
@@ -134,11 +158,31 @@ impl FrontdoorService {
     }
 
     pub fn bootstrap(&self) -> FrontdoorBootstrapResponse {
+        let command_configured =
+            is_non_empty_config_value(self.config.provision_command.as_deref());
+        let default_url_configured =
+            is_non_empty_config_value(self.config.default_instance_url.as_deref());
+        let provisioning_backend = if command_configured {
+            ProvisioningSource::Command.as_str().to_string()
+        } else if default_url_configured {
+            ProvisioningSource::DefaultInstanceUrl.as_str().to_string()
+        } else {
+            ProvisioningSource::Unconfigured.as_str().to_string()
+        };
+
         FrontdoorBootstrapResponse {
             enabled: true,
             require_privy: self.config.require_privy,
             privy_app_id: self.config.privy_app_id.clone(),
             privy_client_id: self.config.privy_client_id.clone(),
+            provisioning_backend,
+            dynamic_provisioning_enabled: command_configured,
+            default_instance_url_configured: default_url_configured,
+            default_instance_looks_eigencloud: self
+                .config
+                .default_instance_url
+                .as_deref()
+                .is_some_and(looks_like_eigencloud_url),
             poll_interval_ms: self.config.poll_interval_ms,
             mandatory_steps: mandatory_frontdoor_steps(),
         }
@@ -314,6 +358,7 @@ impl FrontdoorService {
             config: None,
             status: SessionStatus::AwaitingSignature,
             detail: "Waiting for gasless authorization signature.".to_string(),
+            provisioning_source: ProvisioningSource::Unknown,
             instance_url: None,
             verify_url: None,
             eigen_app_id: None,
@@ -405,22 +450,40 @@ impl FrontdoorService {
         let mut state = self.state.write().await;
         purge_expired_sessions(&mut state);
         let session = state.sessions.get(&session_id)?;
-        Some(FrontdoorSessionResponse {
-            session_id: session.id.to_string(),
-            wallet_address: session.wallet_address.clone(),
-            privy_user_id: session.privy_user_id.clone(),
-            version: session.version,
-            status: session.status.as_str().to_string(),
-            detail: session.detail.clone(),
-            instance_url: session.instance_url.clone(),
-            verify_url: session.verify_url.clone(),
-            eigen_app_id: session.eigen_app_id.clone(),
-            error: session.error.clone(),
-            created_at: session.created_at.to_rfc3339(),
-            updated_at: session.updated_at.to_rfc3339(),
-            expires_at: session.expires_at.to_rfc3339(),
-            profile_name: session.config.as_ref().map(|c| c.profile_name.clone()),
-        })
+        Some(render_session_response(session))
+    }
+
+    pub async fn list_sessions(
+        &self,
+        wallet_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<(usize, Vec<FrontdoorSessionResponse>), String> {
+        let normalized_wallet = match wallet_filter {
+            Some(raw) => Some(normalize_wallet_address(raw).ok_or_else(|| {
+                "wallet_address must be a 0x-prefixed 40-hex address".to_string()
+            })?),
+            None => None,
+        };
+
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+
+        let mut filtered: Vec<FrontdoorSessionResponse> = state
+            .sessions
+            .values()
+            .filter(|session| match normalized_wallet.as_ref() {
+                Some(wallet) => &session.wallet_address == wallet,
+                None => true,
+            })
+            .map(render_session_response)
+            .collect();
+        filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        let total = filtered.len();
+        let capped_limit = limit.min(100);
+        filtered.truncate(capped_limit);
+
+        Ok((total, filtered))
     }
 
     async fn run_provision(self: Arc<Self>, session_id: Uuid) {
@@ -457,7 +520,7 @@ impl FrontdoorService {
             )
         };
 
-        let result = if let Some(cmd_template) = command {
+        let (result, provisioning_source) = if let Some(cmd_template) = command {
             let command_input = ProvisionCommandInput {
                 session_id,
                 wallet: &wallet,
@@ -469,23 +532,30 @@ impl FrontdoorService {
                 config: &cfg,
                 verify_base_url: verify_base_url.as_deref(),
             };
-            execute_provision_command(&cmd_template, &command_input).await
+            (
+                execute_provision_command(&cmd_template, &command_input).await,
+                ProvisioningSource::Command,
+            )
         } else if let Some(url) = default_url {
-            Ok(ProvisioningResult {
-                instance_url: url.clone(),
-                verify_url: if url.starts_with("https://verify-sepolia.eigencloud.xyz/")
-                    || url.starts_with("https://verify.eigencloud.xyz/")
-                {
-                    Some(url)
-                } else {
-                    None
-                },
-                eigen_app_id: None,
-            })
+            (
+                Ok(ProvisioningResult {
+                    instance_url: url.clone(),
+                    verify_url: if looks_like_verify_url(&url) {
+                        Some(url)
+                    } else {
+                        None
+                    },
+                    eigen_app_id: None,
+                }),
+                ProvisioningSource::DefaultInstanceUrl,
+            )
         } else {
-            Err(
-                "No provisioning backend configured (set GATEWAY_FRONTDOOR_PROVISION_COMMAND or GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL)"
-                    .to_string(),
+            (
+                Err(
+                    "No provisioning backend configured (set GATEWAY_FRONTDOOR_PROVISION_COMMAND or GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL)"
+                        .to_string(),
+                ),
+                ProvisioningSource::Unconfigured,
             )
         };
 
@@ -495,6 +565,7 @@ impl FrontdoorService {
             let Some(session) = state.sessions.get_mut(&session_id) else {
                 return;
             };
+            session.provisioning_source = provisioning_source;
 
             match result {
                 Ok(provisioned) => {
@@ -505,6 +576,17 @@ impl FrontdoorService {
                     session.error = None;
                     session.detail = "Enclave is live. Redirect ready.".to_string();
                     session.updated_at = Utc::now();
+
+                    tracing::info!(
+                        session_id = %session.id,
+                        wallet = %session.wallet_address,
+                        provisioning_source = provisioning_source.as_str(),
+                        verification_level = %verification_assurance_level(session.config.as_ref()),
+                        eigen_app_id = ?session.eigen_app_id,
+                        verify_url = ?session.verify_url,
+                        launched_on_eigencloud = ?session_launched_on_eigencloud(session),
+                        "Frontdoor provisioning completed"
+                    );
 
                     wallet_record = Some(WalletSessionRecord {
                         version: session.version,
@@ -518,6 +600,15 @@ impl FrontdoorService {
                     session.detail = "Provisioning failed".to_string();
                     session.error = Some(err);
                     session.updated_at = Utc::now();
+
+                    tracing::warn!(
+                        session_id = %session.id,
+                        wallet = %session.wallet_address,
+                        provisioning_source = provisioning_source.as_str(),
+                        verification_level = %verification_assurance_level(session.config.as_ref()),
+                        error = ?session.error,
+                        "Frontdoor provisioning failed"
+                    );
                 }
             }
         }
@@ -547,6 +638,109 @@ struct ProvisioningResult {
     instance_url: String,
     verify_url: Option<String>,
     eigen_app_id: Option<String>,
+}
+
+fn is_non_empty_config_value(value: Option<&str>) -> bool {
+    value.map(|v| !v.trim().is_empty()).unwrap_or(false)
+}
+
+fn verification_assurance_level(config: Option<&FrontdoorUserConfig>) -> String {
+    let Some(config) = config else {
+        return "unknown".to_string();
+    };
+
+    match config.verification_backend.as_str() {
+        "eigencloud_primary" => {
+            if config.verification_fallback_enabled {
+                if config.verification_fallback_require_signed_receipts {
+                    "primary_plus_signed_fallback".to_string()
+                } else {
+                    "primary_plus_unsigned_fallback".to_string()
+                }
+            } else {
+                "primary_only".to_string()
+            }
+        }
+        "fallback_only" => {
+            if !config.verification_fallback_enabled {
+                "fallback_only_disabled".to_string()
+            } else if config.verification_fallback_require_signed_receipts {
+                "signed_fallback_only".to_string()
+            } else {
+                "unsigned_fallback_only".to_string()
+            }
+        }
+        other => format!("custom:{other}"),
+    }
+}
+
+fn render_session_response(session: &ProvisioningSession) -> FrontdoorSessionResponse {
+    let config = session.config.as_ref();
+    FrontdoorSessionResponse {
+        session_id: session.id.to_string(),
+        wallet_address: session.wallet_address.clone(),
+        privy_user_id: session.privy_user_id.clone(),
+        version: session.version,
+        status: session.status.as_str().to_string(),
+        detail: session.detail.clone(),
+        provisioning_source: session.provisioning_source.as_str().to_string(),
+        dedicated_instance: session.provisioning_source.dedicated_instance(),
+        launched_on_eigencloud: session_launched_on_eigencloud(session),
+        verification_backend: config.map(|c| c.verification_backend.clone()),
+        verification_level: config.map(|_| verification_assurance_level(config)),
+        verification_fallback_enabled: config.map(|c| c.verification_fallback_enabled),
+        verification_fallback_require_signed_receipts: config
+            .map(|c| c.verification_fallback_require_signed_receipts),
+        instance_url: session.instance_url.clone(),
+        verify_url: session.verify_url.clone(),
+        eigen_app_id: session.eigen_app_id.clone(),
+        error: session.error.clone(),
+        created_at: session.created_at.to_rfc3339(),
+        updated_at: session.updated_at.to_rfc3339(),
+        expires_at: session.expires_at.to_rfc3339(),
+        profile_name: config.map(|c| c.profile_name.clone()),
+    }
+}
+
+fn session_launched_on_eigencloud(session: &ProvisioningSession) -> Option<bool> {
+    if session.instance_url.is_none()
+        && session.verify_url.is_none()
+        && session.eigen_app_id.is_none()
+    {
+        return None;
+    }
+
+    let from_app_id = session
+        .eigen_app_id
+        .as_deref()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false);
+    let from_verify_url = session
+        .verify_url
+        .as_deref()
+        .map(looks_like_eigencloud_url)
+        .unwrap_or(false);
+    let from_instance_url = session
+        .instance_url
+        .as_deref()
+        .map(looks_like_eigencloud_url)
+        .unwrap_or(false);
+
+    Some(from_app_id || from_verify_url || from_instance_url)
+}
+
+fn looks_like_eigencloud_url(candidate: &str) -> bool {
+    let Ok(url) = Url::parse(candidate) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    host == "verify-sepolia.eigencloud.xyz"
+        || host == "verify.eigencloud.xyz"
+        || host == "eigencloud.xyz"
+        || host.ends_with(".eigencloud.xyz")
 }
 
 fn execute_provision_output(
@@ -2106,6 +2300,17 @@ mod tests {
             );
             assert_eq!(ready.wallet_address, wallet);
             assert_eq!(ready.profile_name.as_deref(), Some("demo_profile"));
+            assert_eq!(ready.provisioning_source, "default_instance_url");
+            assert!(!ready.dedicated_instance);
+            assert_eq!(ready.launched_on_eigencloud, Some(false));
+            assert_eq!(
+                ready.verification_backend.as_deref(),
+                Some("eigencloud_primary")
+            );
+            assert_eq!(
+                ready.verification_level.as_deref(),
+                Some("primary_plus_signed_fallback")
+            );
         });
     }
 
@@ -2264,6 +2469,62 @@ mod tests {
                 .mandatory_steps
                 .contains(&"configure_runtime_profile_and_risk".to_string())
         );
+    }
+
+    #[test]
+    fn list_sessions_filters_by_wallet() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let tmp = tempdir().expect("tempdir");
+            let service = FrontdoorService::new_for_tests(
+                FrontdoorConfig {
+                    require_privy: false,
+                    privy_app_id: None,
+                    privy_client_id: None,
+                    provision_command: None,
+                    default_instance_url: None,
+                    verify_app_base_url: None,
+                    session_ttl_secs: 900,
+                    poll_interval_ms: 1000,
+                },
+                tmp.path().join("wallet_sessions.json"),
+            );
+
+            let wallet_a = "0x9431Cf5DA0CE60664661341db650763B08286B18".to_string();
+            let wallet_b = "0x8ba1f109551bD432803012645Ac136ddd64DBA72".to_string();
+
+            service
+                .create_challenge(FrontdoorChallengeRequest {
+                    wallet_address: wallet_a.clone(),
+                    privy_user_id: None,
+                    chain_id: Some(1),
+                })
+                .await
+                .expect("challenge a");
+            service
+                .create_challenge(FrontdoorChallengeRequest {
+                    wallet_address: wallet_b.clone(),
+                    privy_user_id: None,
+                    chain_id: Some(1),
+                })
+                .await
+                .expect("challenge b");
+
+            let (total, sessions) = service
+                .list_sessions(Some(&wallet_a), 10)
+                .await
+                .expect("list sessions");
+            assert_eq!(total, 1);
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(
+                sessions[0].wallet_address,
+                "0x9431cf5da0ce60664661341db650763b08286b18"
+            );
+            assert_eq!(sessions[0].provisioning_source, "unknown");
+        });
     }
 
     fn sample_user_config(wallet: &str) -> FrontdoorUserConfig {

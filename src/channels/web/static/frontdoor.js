@@ -10,6 +10,7 @@ const state = {
   privyIdentityToken: "",
   privyAccessToken: "",
   ethereumProvider: null,
+  monitorSnapshot: null,
 };
 
 const el = {
@@ -37,6 +38,12 @@ const el = {
   openInstanceLink: document.getElementById("open-instance-link"),
   openVerifyLink: document.getElementById("open-verify-link"),
   loaderProgressFill: document.getElementById("loader-progress-fill"),
+  refreshMonitorBtn: document.getElementById("refresh-monitor-btn"),
+  monitorSummary: document.getElementById("monitor-summary"),
+  monitorTableWrap: document.getElementById("monitor-table-wrap"),
+  monitorTableBody: document.getElementById("monitor-table-body"),
+  monitorEmpty: document.getElementById("monitor-empty"),
+  monitorError: document.getElementById("monitor-error"),
 };
 
 async function main() {
@@ -57,15 +64,34 @@ async function main() {
       );
       return;
     }
+    if (bootstrap.provisioning_backend === "unconfigured") {
+      setBootstrapStatus(
+        "No provisioning backend configured. Set GATEWAY_FRONTDOOR_PROVISION_COMMAND for per-session enclave deployment.",
+        "warn"
+      );
+      disableProvisioning(
+        "Provisioning backend missing. Configure GATEWAY_FRONTDOOR_PROVISION_COMMAND or GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL."
+      );
+      renderMonitorHintOnly();
+      return;
+    }
     if (bootstrap.require_privy) {
       el.connectWalletBtn.textContent = "Connect Wallet With Privy";
     }
-    setBootstrapStatus(
-      "Gateway ready. Connect wallet, review policy, then sign a gasless authorization transaction.",
-      "ok"
-    );
+    if (bootstrap.provisioning_backend === "default_instance_url") {
+      setBootstrapStatus(
+        "Gateway ready in static fallback mode. Sessions will reuse one configured instance URL unless command provisioning is enabled.",
+        "warn"
+      );
+    } else {
+      setBootstrapStatus(
+        "Gateway ready. Connect wallet, review policy, then sign a gasless authorization transaction.",
+        "ok"
+      );
+    }
     syncWalletLinkedInputs(false);
     syncVerificationControls();
+    renderMonitorHintOnly();
   } catch (err) {
     setBootstrapStatus("Failed to load gateway bootstrap.", "warn");
     disableLaunch("Bootstrap unavailable");
@@ -80,11 +106,15 @@ function bindEvents() {
   document
     .getElementById("verification-fallback-enabled")
     .addEventListener("change", syncVerificationControls);
+  if (el.refreshMonitorBtn) {
+    el.refreshMonitorBtn.addEventListener("click", refreshSessionMonitor);
+  }
 
   el.connectWalletBtn.addEventListener("click", async () => {
     el.walletError.textContent = "";
     try {
       await connectWalletAndPrivy();
+      await refreshSessionMonitor();
     } catch (err) {
       el.walletError.textContent = String(err.message || err);
       setPrivyStatus("Wallet connect failed");
@@ -609,6 +639,7 @@ function startPolling() {
       );
       handleSessionStatus(session);
       if (session.status === "ready" || session.status === "failed" || session.status === "expired") {
+        await refreshSessionMonitor();
         stopPolling();
         return;
       }
@@ -634,6 +665,12 @@ function handleSessionStatus(session) {
     version: session.version,
     status: session.status,
     profile: session.profile_name,
+    provisioningSource: session.provisioning_source,
+    dedicatedInstance: session.dedicated_instance,
+    launchedOnEigencloud: session.launched_on_eigencloud,
+    verificationBackend: session.verification_backend,
+    verificationLevel: session.verification_level,
+    fallbackSigned: session.verification_fallback_require_signed_receipts,
     appId: session.eigen_app_id,
     verifyUrl: session.verify_url,
   });
@@ -653,7 +690,11 @@ function handleSessionStatus(session) {
     }
     advanceLoading("Enclave ready. Redirecting...", 100);
     el.loadingTitle.textContent = "Your enclaved interface is live";
-    el.loadingCopy.textContent = "Launching your dedicated Enclagent instance now.";
+    if (session.dedicated_instance) {
+      el.loadingCopy.textContent = "Launching your dedicated Enclagent instance now.";
+    } else {
+      el.loadingCopy.textContent = "Opening configured instance URL for this gateway.";
+    }
     el.openInstanceLink.href = destination;
     const safeVerifyUrl = sanitizeRedirectUrl(session.verify_url);
     if (safeVerifyUrl) {
@@ -686,6 +727,48 @@ function renderSessionKv(model) {
   if (model.version) rows.push("<p><strong>Version:</strong> v" + escapeHtml(String(model.version)) + "</p>");
   if (model.profile) rows.push("<p><strong>Profile:</strong> " + escapeHtml(String(model.profile)) + "</p>");
   if (model.status) rows.push("<p><strong>Status:</strong> " + escapeHtml(String(model.status)) + "</p>");
+  if (model.provisioningSource) {
+    rows.push(
+      "<p><strong>Provisioning Source:</strong> " +
+        escapeHtml(String(model.provisioningSource)) +
+        "</p>"
+    );
+  }
+  if (typeof model.dedicatedInstance === "boolean") {
+    rows.push(
+      "<p><strong>Dedicated Instance:</strong> " +
+        escapeHtml(model.dedicatedInstance ? "yes" : "no") +
+        "</p>"
+    );
+  }
+  if (typeof model.launchedOnEigencloud === "boolean") {
+    rows.push(
+      "<p><strong>EigenCloud Launch:</strong> " +
+        escapeHtml(model.launchedOnEigencloud ? "detected" : "not detected") +
+        "</p>"
+    );
+  }
+  if (model.verificationBackend) {
+    rows.push(
+      "<p><strong>Verification Backend:</strong> " +
+        escapeHtml(String(model.verificationBackend)) +
+        "</p>"
+    );
+  }
+  if (model.verificationLevel) {
+    rows.push(
+      "<p><strong>Verification Level:</strong> " +
+        escapeHtml(String(model.verificationLevel)) +
+        "</p>"
+    );
+  }
+  if (typeof model.fallbackSigned === "boolean") {
+    rows.push(
+      "<p><strong>Fallback Signed Receipts:</strong> " +
+        escapeHtml(model.fallbackSigned ? "required" : "optional") +
+        "</p>"
+    );
+  }
   if (model.appId) rows.push("<p><strong>Eigen App:</strong> " + escapeHtml(String(model.appId)) + "</p>");
   if (model.verifyUrl) rows.push("<p><strong>Verify:</strong> " + escapeHtml(String(model.verifyUrl)) + "</p>");
   el.sessionKv.innerHTML = rows.join("");
@@ -705,6 +788,142 @@ function disableLaunch(reason) {
   el.connectWalletBtn.disabled = true;
   el.launchSessionBtn.disabled = true;
   el.configError.textContent = reason;
+}
+
+function disableProvisioning(reason) {
+  el.launchSessionBtn.disabled = true;
+  el.configError.textContent = reason;
+}
+
+function renderMonitorHintOnly() {
+  if (!el.monitorSummary) return;
+  const backend = describeProvisioningBackend(
+    state.bootstrap && state.bootstrap.provisioning_backend
+  );
+  el.monitorSummary.textContent = "Provisioning backend: " + backend + ".";
+  if (el.monitorTableWrap) el.monitorTableWrap.classList.add("hidden");
+  if (el.monitorEmpty) el.monitorEmpty.classList.remove("hidden");
+  if (el.monitorTableBody) el.monitorTableBody.innerHTML = "";
+}
+
+async function refreshSessionMonitor() {
+  if (!el.monitorSummary) return;
+  if (el.monitorError) el.monitorError.textContent = "";
+
+  if (!state.walletAddress) {
+    renderMonitorHintOnly();
+    return;
+  }
+
+  const wallet = normalizeOptionalWallet(state.walletAddress);
+  if (!wallet) {
+    renderMonitorHintOnly();
+    return;
+  }
+
+  try {
+    const payload = await fetchJson(
+      "/api/frontdoor/sessions?wallet_address=" +
+        encodeURIComponent(wallet) +
+        "&limit=12"
+    );
+    state.monitorSnapshot = payload;
+    renderMonitorTable(payload);
+  } catch (err) {
+    if (el.monitorError) {
+      el.monitorError.textContent =
+        "Session monitor load failed: " + String(err.message || err);
+    }
+  }
+}
+
+function renderMonitorTable(payload) {
+  if (!el.monitorSummary || !el.monitorTableBody || !el.monitorTableWrap || !el.monitorEmpty) {
+    return;
+  }
+
+  const sessions = Array.isArray(payload && payload.sessions) ? payload.sessions : [];
+  const backend = describeProvisioningBackend(
+    state.bootstrap && state.bootstrap.provisioning_backend
+  );
+  el.monitorSummary.textContent =
+    "Provisioning backend: " +
+    backend +
+    ". Sessions loaded: " +
+    String(sessions.length) +
+    " of " +
+    String(Number(payload && payload.total) || 0) +
+    ".";
+
+  if (!sessions.length) {
+    el.monitorTableBody.innerHTML = "";
+    el.monitorTableWrap.classList.add("hidden");
+    el.monitorEmpty.classList.remove("hidden");
+    return;
+  }
+
+  const rows = sessions.map((session) => {
+    const status = String(session.status || "-");
+    const statusClass = "status-pill status-" + status.replace(/[^a-z0-9_-]/gi, "");
+    const sessionId = String(session.session_id || "");
+    const shortSession = sessionId ? sessionId.slice(0, 8) + "..." : "-";
+    const provisioningSource = String(session.provisioning_source || "unknown");
+    const dedicated = session.dedicated_instance ? "dedicated" : "shared";
+    const eigencloud = typeof session.launched_on_eigencloud === "boolean"
+      ? (session.launched_on_eigencloud ? "yes" : "no")
+      : "pending";
+    const verification = [
+      session.verification_level || "-",
+      session.verification_backend || "-",
+    ].join(" / ");
+    return (
+      "<tr>" +
+      "<td title=\"" +
+      escapeHtml(sessionId) +
+      "\">" +
+      escapeHtml(shortSession) +
+      "</td>" +
+      "<td><span class=\"" +
+      escapeHtml(statusClass) +
+      "\">" +
+      escapeHtml(status) +
+      "</span></td>" +
+      "<td>" +
+      escapeHtml(provisioningSource) +
+      " (" +
+      escapeHtml(dedicated) +
+      ")</td>" +
+      "<td>" +
+      escapeHtml(eigencloud) +
+      "</td>" +
+      "<td>" +
+      escapeHtml(verification) +
+      "</td>" +
+      "<td>" +
+      escapeHtml(formatTimestamp(session.updated_at)) +
+      "</td>" +
+      "</tr>"
+    );
+  });
+
+  el.monitorTableBody.innerHTML = rows.join("");
+  el.monitorEmpty.classList.add("hidden");
+  el.monitorTableWrap.classList.remove("hidden");
+}
+
+function describeProvisioningBackend(value) {
+  const backend = String(value || "").trim();
+  if (backend === "command") return "command dynamic provisioning";
+  if (backend === "default_instance_url") return "static fallback URL";
+  if (backend === "unconfigured") return "unconfigured";
+  return backend || "unknown";
+}
+
+function formatTimestamp(value) {
+  if (!value) return "-";
+  const d = new Date(String(value));
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString();
 }
 
 function normalizedPrivyId() {

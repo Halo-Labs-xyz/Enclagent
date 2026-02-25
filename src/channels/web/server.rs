@@ -192,7 +192,8 @@ pub async fn start_server(
         .route(
             "/api/frontdoor/session/{session_id}",
             get(frontdoor_session_handler),
-        );
+        )
+        .route("/api/frontdoor/sessions", get(frontdoor_sessions_handler));
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -449,6 +450,10 @@ async fn frontdoor_bootstrap_handler(
             require_privy: false,
             privy_app_id: None,
             privy_client_id: None,
+            provisioning_backend: "unconfigured".to_string(),
+            dynamic_provisioning_enabled: false,
+            default_instance_url_configured: false,
+            default_instance_looks_eigencloud: false,
             poll_interval_ms: 1500,
             mandatory_steps: Vec::new(),
         })
@@ -525,6 +530,28 @@ async fn frontdoor_session_handler(
         .await
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, "session not found".to_string()))
+}
+
+async fn frontdoor_sessions_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(query): Query<FrontdoorSessionListQuery>,
+) -> Result<Json<FrontdoorSessionMonitorResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let limit = query.limit.unwrap_or(20).max(1).min(100);
+    let (total, sessions) = frontdoor
+        .list_sessions(query.wallet_address.as_deref(), limit)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(FrontdoorSessionMonitorResponse {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        wallet_address: query.wallet_address,
+        limit,
+        total,
+        sessions,
+    }))
 }
 
 // --- Chat handlers ---
