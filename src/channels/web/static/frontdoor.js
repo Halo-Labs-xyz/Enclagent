@@ -865,8 +865,7 @@ function renderMonitorTable(payload) {
   const rows = sessions.map((session) => {
     const status = String(session.status || "-");
     const statusClass = "status-pill status-" + status.replace(/[^a-z0-9_-]/gi, "");
-    const sessionId = String(session.session_id || "");
-    const shortSession = sessionId ? sessionId.slice(0, 8) + "..." : "-";
+    const sessionRef = String(session.session_ref || "-");
     const provisioningSource = String(session.provisioning_source || "unknown");
     const dedicated = session.dedicated_instance ? "dedicated" : "shared";
     const eigencloud = typeof session.launched_on_eigencloud === "boolean"
@@ -879,9 +878,9 @@ function renderMonitorTable(payload) {
     return (
       "<tr>" +
       "<td title=\"" +
-      escapeHtml(sessionId) +
+      escapeHtml(sessionRef) +
       "\">" +
-      escapeHtml(shortSession) +
+      escapeHtml(sessionRef) +
       "</td>" +
       "<td><span class=\"" +
       escapeHtml(statusClass) +

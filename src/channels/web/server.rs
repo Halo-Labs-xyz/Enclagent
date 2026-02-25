@@ -540,14 +540,18 @@ async fn frontdoor_sessions_handler(
         StatusCode::NOT_FOUND,
         "Frontdoor provisioning is not enabled".to_string(),
     ))?;
+    let wallet_address = query.wallet_address.ok_or((
+        StatusCode::BAD_REQUEST,
+        "wallet_address query parameter is required".to_string(),
+    ))?;
     let limit = query.limit.unwrap_or(20).max(1).min(100);
     let (total, sessions) = frontdoor
-        .list_sessions(query.wallet_address.as_deref(), limit)
+        .list_sessions(Some(wallet_address.as_str()), limit)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(FrontdoorSessionMonitorResponse {
         generated_at: chrono::Utc::now().to_rfc3339(),
-        wallet_address: query.wallet_address,
+        wallet_address,
         limit,
         total,
         sessions,

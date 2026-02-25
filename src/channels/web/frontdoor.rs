@@ -23,9 +23,9 @@ use uuid::Uuid;
 use crate::channels::web::types::{
     FrontdoorBootstrapResponse, FrontdoorChallengeRequest, FrontdoorChallengeResponse,
     FrontdoorConfigContractResponse, FrontdoorConfigDefaults, FrontdoorConfigEnums,
-    FrontdoorDomainProfile, FrontdoorSessionResponse, FrontdoorSuggestConfigRequest,
-    FrontdoorSuggestConfigResponse, FrontdoorUserConfig, FrontdoorVerifyRequest,
-    FrontdoorVerifyResponse,
+    FrontdoorDomainProfile, FrontdoorSessionResponse, FrontdoorSessionSummaryResponse,
+    FrontdoorSuggestConfigRequest, FrontdoorSuggestConfigResponse, FrontdoorUserConfig,
+    FrontdoorVerifyRequest, FrontdoorVerifyResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -457,7 +457,7 @@ impl FrontdoorService {
         &self,
         wallet_filter: Option<&str>,
         limit: usize,
-    ) -> Result<(usize, Vec<FrontdoorSessionResponse>), String> {
+    ) -> Result<(usize, Vec<FrontdoorSessionSummaryResponse>), String> {
         let normalized_wallet = match wallet_filter {
             Some(raw) => Some(normalize_wallet_address(raw).ok_or_else(|| {
                 "wallet_address must be a 0x-prefixed 40-hex address".to_string()
@@ -468,14 +468,14 @@ impl FrontdoorService {
         let mut state = self.state.write().await;
         purge_expired_sessions(&mut state);
 
-        let mut filtered: Vec<FrontdoorSessionResponse> = state
+        let mut filtered: Vec<FrontdoorSessionSummaryResponse> = state
             .sessions
             .values()
             .filter(|session| match normalized_wallet.as_ref() {
                 Some(wallet) => &session.wallet_address == wallet,
                 None => true,
             })
-            .map(render_session_response)
+            .map(render_session_summary)
             .collect();
         filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
@@ -695,6 +695,29 @@ fn render_session_response(session: &ProvisioningSession) -> FrontdoorSessionRes
         verify_url: session.verify_url.clone(),
         eigen_app_id: session.eigen_app_id.clone(),
         error: session.error.clone(),
+        created_at: session.created_at.to_rfc3339(),
+        updated_at: session.updated_at.to_rfc3339(),
+        expires_at: session.expires_at.to_rfc3339(),
+        profile_name: config.map(|c| c.profile_name.clone()),
+    }
+}
+
+fn render_session_summary(session: &ProvisioningSession) -> FrontdoorSessionSummaryResponse {
+    let config = session.config.as_ref();
+    FrontdoorSessionSummaryResponse {
+        session_ref: session.id.to_string().chars().take(8).collect(),
+        wallet_address: session.wallet_address.clone(),
+        version: session.version,
+        status: session.status.as_str().to_string(),
+        detail: session.detail.clone(),
+        provisioning_source: session.provisioning_source.as_str().to_string(),
+        dedicated_instance: session.provisioning_source.dedicated_instance(),
+        launched_on_eigencloud: session_launched_on_eigencloud(session),
+        verification_backend: config.map(|c| c.verification_backend.clone()),
+        verification_level: config.map(|_| verification_assurance_level(config)),
+        verification_fallback_enabled: config.map(|c| c.verification_fallback_enabled),
+        verification_fallback_require_signed_receipts: config
+            .map(|c| c.verification_fallback_require_signed_receipts),
         created_at: session.created_at.to_rfc3339(),
         updated_at: session.updated_at.to_rfc3339(),
         expires_at: session.expires_at.to_rfc3339(),

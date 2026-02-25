@@ -134,7 +134,7 @@ Public (no gateway token required):
 - `POST /api/frontdoor/suggest-config`
 - `POST /api/frontdoor/verify`
 - `GET /api/frontdoor/session/{session_id}`
-- `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>`
+- `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>` (wallet filter required)
 
 Session status/monitor responses include provisioning audit fields:
 
@@ -145,6 +145,8 @@ Session status/monitor responses include provisioning audit fields:
 - `verification_level` (`primary_only`, `primary_plus_signed_fallback`, `signed_fallback_only`, etc.)
 - `verification_fallback_enabled`
 - `verification_fallback_require_signed_receipts`
+
+`/api/frontdoor/sessions` returns redacted summary rows (no session UUID, instance URL, or verify URL) for safer public monitoring.
 
 The root UI (`/`) auto-switches to the frontdoor page when frontdoor mode is enabled.
 

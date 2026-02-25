@@ -1023,11 +1023,36 @@ pub struct FrontdoorSessionResponse {
 #[derive(Debug, Serialize)]
 pub struct FrontdoorSessionMonitorResponse {
     pub generated_at: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wallet_address: Option<String>,
+    pub wallet_address: String,
     pub limit: usize,
     pub total: usize,
-    pub sessions: Vec<FrontdoorSessionResponse>,
+    pub sessions: Vec<FrontdoorSessionSummaryResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorSessionSummaryResponse {
+    pub session_ref: String,
+    pub wallet_address: String,
+    pub version: u64,
+    pub status: String,
+    pub detail: String,
+    pub provisioning_source: String,
+    pub dedicated_instance: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launched_on_eigencloud: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_level: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_fallback_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_fallback_require_signed_receipts: Option<bool>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile_name: Option<String>,
 }
 
 // --- Health ---
