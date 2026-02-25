@@ -101,6 +101,7 @@ Full local gate:
 - Architecture: `docs/ENCLAGENT_ARCHITECTURE.md`
 - Fork status: `docs/ENCLAGENT_FORK_STATUS.md`
 - Frontdoor flow: `docs/FRONTDOOR_ENCLAVE_FLOW.md`
+- Privy agent wallets + TEE migration: `docs/PRIVY_AGENTIC_WALLETS_AND_TEE_MIGRATION.md`
 - Local verification: `docs/LOCAL_VERIFICATION.md`
 - Channel builds: `docs/BUILDING_CHANNELS.md`
 - Telegram setup: `docs/TELEGRAM_SETUP.md`
