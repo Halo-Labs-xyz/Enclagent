@@ -449,11 +449,137 @@ async function main() {
     renderIdentityEntryPathState();
     renderMonitorHintOnly();
     renderModuleStateMachine();
+    if (bootstrap.privy_app_id) {
+      mountPrivyNativeLoginButton(bootstrap);
+    } else {
+      showFallbackConnectButton();
+    }
   } catch (err) {
     setBootstrapStatus("Failed to load gateway bootstrap.", "warn");
     disableLaunch("Bootstrap unavailable");
     setTypedFailureText(el.walletError, "Bootstrap failed", err);
     renderModuleStateMachine();
+    showFallbackConnectButton();
+  }
+}
+
+function showFallbackConnectButton() {
+  const root = document.getElementById("privy-connect-root");
+  const btn = document.getElementById("connect-wallet-btn");
+  if (root) root.innerHTML = "";
+  if (btn) {
+    btn.classList.remove("hidden");
+    btn.textContent = "Connect wallet";
+  }
+}
+
+function enclagentPrivyLoginComplete(payload) {
+  const walletAddress = (payload && payload.walletAddress) ? String(payload.walletAddress).trim() : "";
+  const privyUserId = (payload && payload.privyUserId) ? String(payload.privyUserId).trim() : "";
+  const identityToken = (payload && payload.identityToken) ? String(payload.identityToken).trim() : "";
+  const accessToken = (payload && payload.accessToken) ? String(payload.accessToken).trim() : "";
+  const chainId = (payload && payload.chainId) != null ? String(payload.chainId) : "";
+  if (walletAddress && /^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+    state.walletAddress = walletAddress;
+    state.chainId = chainId;
+    state.privyUserId = privyUserId || ("wallet:" + walletAddress);
+    state.privyIdentityToken = identityToken || null;
+    state.privyAccessToken = accessToken || null;
+    state.walletBindingVerified = true;
+    if (el.walletAddress) el.walletAddress.value = state.walletAddress;
+    if (el.walletChainId) el.walletChainId.value = state.chainId;
+    if (el.privyUserId) el.privyUserId.value = state.privyUserId;
+    setPrivyStatus("Wallet connected (Privy)");
+    syncWalletLinkedInputs(true);
+    refreshSessionMonitor().catch(() => {});
+    renderIdentityEntryPathState();
+    renderModuleStateMachine();
+  }
+}
+
+async function mountPrivyNativeLoginButton(bootstrap) {
+  const appId = (bootstrap && bootstrap.privy_app_id) ? String(bootstrap.privy_app_id).trim() : "";
+  if (!appId) {
+    showFallbackConnectButton();
+    return;
+  }
+  const rootEl = document.getElementById("privy-connect-root");
+  const fallbackBtn = document.getElementById("connect-wallet-btn");
+  if (!rootEl) {
+    if (fallbackBtn) fallbackBtn.classList.remove("hidden");
+    return;
+  }
+  if (fallbackBtn) fallbackBtn.classList.add("hidden");
+  window.__enclagentPrivyLoginComplete = enclagentPrivyLoginComplete;
+  try {
+    const [ReactMod, ReactDOMClientMod, PrivyAuth] = await Promise.all([
+      import("https://esm.sh/react@18?bundle"),
+      import("https://esm.sh/react-dom@18/client?bundle"),
+      import("https://esm.sh/@privy-io/react-auth@0.58.7?bundle"),
+    ]);
+    const React = ReactMod.default || ReactMod;
+    const ReactDOMClient = ReactDOMClientMod.default || ReactDOMClientMod;
+    const createRoot = ReactDOMClient.createRoot;
+    if (typeof createRoot !== "function") {
+      showFallbackConnectButton();
+      return;
+    }
+    const createElement = React.createElement;
+    const PrivyProvider = PrivyAuth.PrivyProvider || (PrivyAuth.default && PrivyAuth.default.PrivyProvider);
+    const useLogin = PrivyAuth.useLogin || (PrivyAuth.default && PrivyAuth.default.useLogin);
+    const usePrivy = PrivyAuth.usePrivy || (PrivyAuth.default && PrivyAuth.default.usePrivy);
+    if (!PrivyProvider || !useLogin || !usePrivy) {
+      showFallbackConnectButton();
+      return;
+    }
+    const clientId = (bootstrap.privy_client_id && String(bootstrap.privy_client_id).trim()) || undefined;
+    const LoginButtonWrapper = function () {
+      const privy = usePrivy();
+      const getIdentityToken = privy && typeof privy.getIdentityToken === "function" ? privy.getIdentityToken.bind(privy) : function () { return Promise.resolve(""); };
+      const getAccessToken = privy && typeof privy.getAccessToken === "function" ? privy.getAccessToken.bind(privy) : function () { return Promise.resolve(""); };
+      const { login } = useLogin({
+        onComplete: async function (payload) {
+          const user = payload && payload.user;
+          const walletAccount = user && user.accounts && user.accounts.find(function (a) { return a.type === "wallet"; });
+          const walletAddress = (walletAccount && walletAccount.address) ? String(walletAccount.address).trim() : "";
+          const privyUserId = (user && (user.id || user.user_id)) ? String(user.id || user.user_id).trim() : (walletAddress ? "wallet:" + walletAddress : "");
+          let identityToken = "";
+          let accessToken = "";
+          let chainId = "";
+          try {
+            identityToken = (await getIdentityToken()) || "";
+            accessToken = (await getAccessToken()) || "";
+          } catch (_) {}
+          if (typeof window.__enclagentPrivyLoginComplete === "function") {
+            window.__enclagentPrivyLoginComplete({ walletAddress, privyUserId, identityToken, accessToken, chainId });
+          }
+        },
+        onError: function (err) {
+          if (el.walletError) el.walletError.textContent = err && err.message ? err.message : "Privy login failed.";
+          setPrivyStatus("Login failed");
+        },
+      });
+      const ready = privy && privy.ready;
+      const authenticated = privy && privy.authenticated;
+      const disabled = !ready || !!authenticated;
+      return createElement("button", {
+        type: "button",
+        className: "btn-primary",
+        onClick: function () { login(); },
+        disabled: disabled,
+      }, authenticated ? "Connected" : "Log in with Privy");
+    };
+    const providerConfig = {
+      appId,
+      config: { loginMethods: ["wallet", "email", "google", "apple", "github", "discord", "twitter"] },
+    };
+    if (clientId) providerConfig.clientId = clientId;
+    const app = createElement(PrivyProvider, providerConfig, createElement(LoginButtonWrapper));
+    const root = createRoot(rootEl);
+    root.render(app);
+  } catch (err) {
+    if (el.walletError) el.walletError.textContent = "Could not load Privy. Use the connect button below.";
+    showFallbackConnectButton();
   }
 }
 

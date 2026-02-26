@@ -181,8 +181,9 @@
           <input id="privy-auth-status" type="text" value="Not connected" readonly>
         </label>
       </div>
-      <div class="actions">
-        <button id="connect-wallet-btn" class="btn-primary">Connect With Privy</button>
+      <div class="actions" id="connect-wallet-actions">
+        <div id="privy-connect-root"></div>
+        <button id="connect-wallet-btn" class="btn-primary hidden" type="button">Connect wallet</button>
       </div>
       <div class="error-text" id="wallet-error"></div>
     </section>
