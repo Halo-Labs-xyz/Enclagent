@@ -179,7 +179,23 @@ pub async fn start_server(
             "/api/frontdoor/config-contract",
             get(frontdoor_config_contract_handler),
         )
+        .route(
+            "/api/frontdoor/policy-templates",
+            get(frontdoor_policy_template_library_handler),
+        )
+        .route(
+            "/api/frontdoor/experience/manifest",
+            get(frontdoor_experience_manifest_handler),
+        )
         .route("/api/frontdoor/bootstrap", get(frontdoor_bootstrap_handler))
+        .route(
+            "/api/frontdoor/onboarding/state",
+            get(frontdoor_onboarding_state_handler),
+        )
+        .route(
+            "/api/frontdoor/onboarding/chat",
+            post(frontdoor_onboarding_chat_handler),
+        )
         .route(
             "/api/frontdoor/challenge",
             post(frontdoor_challenge_handler),
@@ -192,6 +208,26 @@ pub async fn start_server(
         .route(
             "/api/frontdoor/session/{session_id}",
             get(frontdoor_session_handler),
+        )
+        .route(
+            "/api/frontdoor/session/{session_id}/timeline",
+            get(frontdoor_session_timeline_handler),
+        )
+        .route(
+            "/api/frontdoor/session/{session_id}/verification-explanation",
+            get(frontdoor_verification_explanation_handler),
+        )
+        .route(
+            "/api/frontdoor/session/{session_id}/runtime-control",
+            post(frontdoor_runtime_control_handler),
+        )
+        .route(
+            "/api/frontdoor/session/{session_id}/gateway-todos",
+            get(frontdoor_gateway_todos_handler),
+        )
+        .route(
+            "/api/frontdoor/session/{session_id}/funding-preflight",
+            get(frontdoor_funding_preflight_handler),
         )
         .route("/api/frontdoor/sessions", get(frontdoor_sessions_handler));
 
@@ -250,6 +286,11 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        .route(
+            "/api/frontdoor/operator/sessions",
+            get(frontdoor_operator_sessions_handler),
+        )
+        .route("/api/gateway/todos", get(gateway_todos_handler))
         // Skills
         .route("/api/skills", get(skills_list_handler))
         .route("/api/skills/search", post(skills_search_handler))
@@ -453,6 +494,7 @@ async fn frontdoor_bootstrap_handler(
             provisioning_backend: "unconfigured".to_string(),
             dynamic_provisioning_enabled: false,
             default_instance_url_configured: false,
+            default_instance_fallback_enabled: false,
             default_instance_looks_eigencloud: false,
             poll_interval_ms: 1500,
             mandatory_steps: Vec::new(),
@@ -468,6 +510,58 @@ async fn frontdoor_config_contract_handler(
         "Frontdoor provisioning is not enabled".to_string(),
     ))?;
     Ok(Json(frontdoor.config_contract()))
+}
+
+async fn frontdoor_policy_template_library_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<FrontdoorPolicyTemplateLibraryResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    Ok(Json(frontdoor.policy_template_library()))
+}
+
+async fn frontdoor_experience_manifest_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<FrontdoorExperienceManifestResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    Ok(Json(frontdoor.experience_manifest()))
+}
+
+async fn frontdoor_onboarding_state_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(query): Query<FrontdoorOnboardingStateQuery>,
+) -> Result<Json<FrontdoorOnboardingStateResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let session_id = Uuid::parse_str(query.session_id.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid session id".to_string()))?;
+    frontdoor
+        .onboarding_state(session_id)
+        .await
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "session not found".to_string()))
+}
+
+async fn frontdoor_onboarding_chat_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<FrontdoorOnboardingChatRequest>,
+) -> Result<Json<FrontdoorOnboardingChatResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    frontdoor
+        .onboarding_chat(req)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
 async fn frontdoor_challenge_handler(
@@ -532,6 +626,92 @@ async fn frontdoor_session_handler(
         .ok_or((StatusCode::NOT_FOUND, "session not found".to_string()))
 }
 
+async fn frontdoor_session_timeline_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<FrontdoorSessionTimelineResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let session_id = Uuid::parse_str(session_id.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid session id".to_string()))?;
+    frontdoor
+        .session_timeline(session_id)
+        .await
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "session not found".to_string()))
+}
+
+async fn frontdoor_verification_explanation_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<FrontdoorVerificationExplanationResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let session_id = Uuid::parse_str(session_id.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid session id".to_string()))?;
+    frontdoor
+        .verification_explanation(session_id)
+        .await
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "session not found".to_string()))
+}
+
+async fn frontdoor_runtime_control_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(session_id): Path<String>,
+    Json(req): Json<FrontdoorRuntimeControlRequest>,
+) -> Result<Json<FrontdoorRuntimeControlResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let session_id = Uuid::parse_str(session_id.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid session id".to_string()))?;
+    frontdoor
+        .runtime_control(session_id, req)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))
+}
+
+async fn frontdoor_gateway_todos_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<FrontdoorGatewayTodosResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let session_id = Uuid::parse_str(session_id.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid session id".to_string()))?;
+    frontdoor
+        .gateway_todos_for_session(session_id)
+        .await
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "session not found".to_string()))
+}
+
+async fn frontdoor_funding_preflight_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(session_id): Path<String>,
+) -> Result<Json<FrontdoorFundingPreflightResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let session_id = Uuid::parse_str(session_id.trim())
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid session id".to_string()))?;
+    frontdoor
+        .funding_preflight(session_id)
+        .await
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "session not found".to_string()))
+}
+
 async fn frontdoor_sessions_handler(
     State(state): State<Arc<GatewayState>>,
     Query(query): Query<FrontdoorSessionListQuery>,
@@ -544,7 +724,7 @@ async fn frontdoor_sessions_handler(
         StatusCode::BAD_REQUEST,
         "wallet_address query parameter is required".to_string(),
     ))?;
-    let limit = query.limit.unwrap_or(20).max(1).min(100);
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
     let (total, sessions) = frontdoor
         .list_sessions(Some(wallet_address.as_str()), limit)
         .await
@@ -553,6 +733,55 @@ async fn frontdoor_sessions_handler(
         generated_at: chrono::Utc::now().to_rfc3339(),
         wallet_address,
         limit,
+        total,
+        sessions,
+    }))
+}
+
+async fn frontdoor_operator_sessions_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(query): Query<FrontdoorOperatorSessionListQuery>,
+) -> Result<Json<FrontdoorOperatorSessionMonitorResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let (total, sessions) = frontdoor
+        .list_sessions_full(query.wallet_address.as_deref(), limit)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(FrontdoorOperatorSessionMonitorResponse {
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        wallet_address: query.wallet_address,
+        limit,
+        total,
+        sessions,
+    }))
+}
+
+async fn gateway_todos_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(query): Query<GatewayTodoListQuery>,
+) -> Result<Json<GatewayTodoListResponse>, (StatusCode, String)> {
+    let frontdoor = state.frontdoor.as_ref().ok_or((
+        StatusCode::NOT_FOUND,
+        "Frontdoor provisioning is not enabled".to_string(),
+    ))?;
+    let limit = query.limit.unwrap_or(20).clamp(1, 100);
+    let session_id = match query.session_id.as_deref() {
+        Some(raw) => Some(
+            Uuid::parse_str(raw.trim())
+                .map_err(|_| (StatusCode::BAD_REQUEST, "invalid session id".to_string()))?,
+        ),
+        None => None,
+    };
+    let (total, sessions) = frontdoor
+        .gateway_todos(query.wallet_address.as_deref(), session_id, limit)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(GatewayTodoListResponse {
+        generated_at: chrono::Utc::now().to_rfc3339(),
         total,
         sessions,
     }))

@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -23,9 +24,19 @@ use uuid::Uuid;
 use crate::channels::web::types::{
     FrontdoorBootstrapResponse, FrontdoorChallengeRequest, FrontdoorChallengeResponse,
     FrontdoorConfigContractResponse, FrontdoorConfigDefaults, FrontdoorConfigEnums,
-    FrontdoorDomainProfile, FrontdoorSessionResponse, FrontdoorSessionSummaryResponse,
-    FrontdoorSuggestConfigRequest, FrontdoorSuggestConfigResponse, FrontdoorUserConfig,
-    FrontdoorVerifyRequest, FrontdoorVerifyResponse,
+    FrontdoorDomainProfile, FrontdoorEvidenceLabel, FrontdoorExperienceManifestResponse,
+    FrontdoorExperienceStep, FrontdoorFundingPreflightCheck, FrontdoorFundingPreflightResponse,
+    FrontdoorGatewayTodoItem, FrontdoorGatewayTodosResponse, FrontdoorOnboardingChatRequest,
+    FrontdoorOnboardingChatResponse, FrontdoorOnboardingRequiredVariable,
+    FrontdoorOnboardingStateResponse, FrontdoorOnboardingStep2Payload,
+    FrontdoorOnboardingStep3Payload, FrontdoorOnboardingStep4Payload,
+    FrontdoorOnboardingTranscriptArtifactResponse, FrontdoorOnboardingTurn,
+    FrontdoorPolicyTemplate, FrontdoorPolicyTemplateConfig, FrontdoorPolicyTemplateLibraryResponse,
+    FrontdoorPolicyTemplateRiskProfile, FrontdoorRuntimeControlRequest,
+    FrontdoorRuntimeControlResponse, FrontdoorSessionResponse, FrontdoorSessionSummaryResponse,
+    FrontdoorSessionTimelineEvent, FrontdoorSessionTimelineResponse, FrontdoorSuggestConfigRequest,
+    FrontdoorSuggestConfigResponse, FrontdoorTodoEvidenceRefs, FrontdoorUserConfig,
+    FrontdoorVerificationExplanationResponse, FrontdoorVerifyRequest, FrontdoorVerifyResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -35,6 +46,7 @@ pub struct FrontdoorConfig {
     pub privy_client_id: Option<String>,
     pub provision_command: Option<String>,
     pub default_instance_url: Option<String>,
+    pub allow_default_instance_fallback: bool,
     pub verify_app_base_url: Option<String>,
     pub session_ttl_secs: u64,
     pub poll_interval_ms: u64,
@@ -82,6 +94,71 @@ enum ProvisioningSource {
     Unconfigured,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum RuntimeState {
+    Running,
+    Paused,
+    Terminated,
+}
+
+impl RuntimeState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Terminated => "terminated",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OnboardingTurnState {
+    role: String,
+    message: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct OnboardingState {
+    current_step: String,
+    completed: bool,
+    objective: Option<String>,
+    missing_fields: Vec<String>,
+    step2_payload: Option<FrontdoorOnboardingStep2Payload>,
+    step3_payload: Option<FrontdoorOnboardingStep3Payload>,
+    step4_payload: Option<FrontdoorOnboardingStep4Payload>,
+    transcript_artifact_id: Option<String>,
+    captured_variables: HashMap<String, String>,
+    transcript: Vec<OnboardingTurnState>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct TimelineEvent {
+    seq_id: u64,
+    event_type: String,
+    status: String,
+    detail: String,
+    actor: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+struct FundingPreflightCheckState {
+    check_id: String,
+    status: String,
+    detail: String,
+}
+
+#[derive(Debug, Clone)]
+struct FundingPreflightState {
+    status: String,
+    failure_category: Option<String>,
+    checks: Vec<FundingPreflightCheckState>,
+    updated_at: DateTime<Utc>,
+}
+
 impl ProvisioningSource {
     fn as_str(self) -> &'static str {
         match self {
@@ -111,9 +188,16 @@ struct ProvisioningSession {
     status: SessionStatus,
     detail: String,
     provisioning_source: ProvisioningSource,
+    runtime_state: RuntimeState,
     instance_url: Option<String>,
     verify_url: Option<String>,
     eigen_app_id: Option<String>,
+    signature_verification_latency_ms: Option<u64>,
+    provisioning_started_at: Option<DateTime<Utc>>,
+    onboarding: OnboardingState,
+    timeline: Vec<TimelineEvent>,
+    next_timeline_seq_id: u64,
+    funding_preflight: FundingPreflightState,
     error: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
@@ -134,6 +218,17 @@ pub struct FrontdoorService {
 
 const FRONTDOOR_CURRENT_CONFIG_VERSION: u32 = 2;
 const FRONTDOOR_SUPPORTED_CONFIG_VERSIONS: [u32; 2] = [1, 2];
+const ONBOARDING_GATEWAY_AUTH_FROM_CONFIG_MARKER: &str = "__from_config__";
+const FRONTDOOR_SUPPORTED_DOMAINS: [&str; 8] = [
+    "general",
+    "developer",
+    "creative",
+    "research",
+    "business_ops",
+    "communications",
+    "hyperliquid",
+    "eigenda",
+];
 
 impl FrontdoorService {
     pub fn new(config: FrontdoorConfig) -> Arc<Self> {
@@ -158,13 +253,15 @@ impl FrontdoorService {
     }
 
     pub fn bootstrap(&self) -> FrontdoorBootstrapResponse {
-        let command_configured =
-            is_non_empty_config_value(self.config.provision_command.as_deref());
+        let command_configured = parse_provision_command_template(
+            self.config.provision_command.as_deref().unwrap_or_default(),
+        )
+        .is_ok();
         let default_url_configured =
             is_non_empty_config_value(self.config.default_instance_url.as_deref());
         let provisioning_backend = if command_configured {
             ProvisioningSource::Command.as_str().to_string()
-        } else if default_url_configured {
+        } else if self.config.allow_default_instance_fallback && default_url_configured {
             ProvisioningSource::DefaultInstanceUrl.as_str().to_string()
         } else {
             ProvisioningSource::Unconfigured.as_str().to_string()
@@ -178,6 +275,8 @@ impl FrontdoorService {
             provisioning_backend,
             dynamic_provisioning_enabled: command_configured,
             default_instance_url_configured: default_url_configured,
+            default_instance_fallback_enabled: self.config.allow_default_instance_fallback
+                && default_url_configured,
             default_instance_looks_eigencloud: self
                 .config
                 .default_instance_url
@@ -193,16 +292,10 @@ impl FrontdoorService {
             contract_id: "enclagent.frontdoor.launchpad".to_string(),
             current_config_version: FRONTDOOR_CURRENT_CONFIG_VERSION,
             supported_config_versions: FRONTDOOR_SUPPORTED_CONFIG_VERSIONS.to_vec(),
-            supported_domains: vec![
-                "general".to_string(),
-                "developer".to_string(),
-                "creative".to_string(),
-                "research".to_string(),
-                "business_ops".to_string(),
-                "communications".to_string(),
-                "hyperliquid".to_string(),
-                "eigenda".to_string(),
-            ],
+            supported_domains: FRONTDOOR_SUPPORTED_DOMAINS
+                .iter()
+                .map(|domain| (*domain).to_string())
+                .collect(),
             domain_profiles: frontdoor_domain_profiles(),
             mandatory_steps: mandatory_frontdoor_steps(),
             enums: FrontdoorConfigEnums {
@@ -263,6 +356,13 @@ impl FrontdoorService {
                 verification_fallback_enabled: true,
                 verification_fallback_require_signed_receipts: true,
             },
+        }
+    }
+
+    pub fn policy_template_library(&self) -> FrontdoorPolicyTemplateLibraryResponse {
+        FrontdoorPolicyTemplateLibraryResponse {
+            generated_at: Utc::now().to_rfc3339(),
+            templates: frontdoor_policy_templates(),
         }
     }
 
@@ -346,7 +446,7 @@ impl FrontdoorService {
             now.to_rfc3339()
         );
 
-        let session = ProvisioningSession {
+        let mut session = ProvisioningSession {
             id: session_id,
             wallet_address: wallet.clone(),
             privy_user_id: req.privy_user_id,
@@ -359,14 +459,37 @@ impl FrontdoorService {
             status: SessionStatus::AwaitingSignature,
             detail: "Waiting for gasless authorization signature.".to_string(),
             provisioning_source: ProvisioningSource::Unknown,
+            runtime_state: RuntimeState::Running,
             instance_url: None,
             verify_url: None,
             eigen_app_id: None,
+            signature_verification_latency_ms: None,
+            provisioning_started_at: None,
+            onboarding: default_onboarding_state(session_id, now),
+            timeline: Vec::new(),
+            next_timeline_seq_id: 1,
+            funding_preflight: pending_funding_preflight(now),
             error: None,
             created_at: now,
             updated_at: now,
             expires_at,
         };
+        push_timeline_event(
+            &mut session,
+            "challenge_created",
+            "awaiting_signature",
+            "Wallet challenge issued",
+            "system",
+        );
+        let todo_snapshot = todo_status_summary(&build_gateway_todos(&session));
+        push_timeline_event(
+            &mut session,
+            "todo_snapshot",
+            "awaiting_signature",
+            &todo_snapshot,
+            "system",
+        );
+        self.persist_onboarding_transcript(&session)?;
         state.sessions.insert(session_id, session);
 
         Ok(FrontdoorChallengeResponse {
@@ -423,15 +546,90 @@ impl FrontdoorService {
             if !message_matches(&req.message, &session.message) {
                 return Err("signed message does not match challenge".to_string());
             }
+            let signature_started = Instant::now();
             verify_wallet_signature(&req.message, &req.signature, &wallet)?;
+            let signature_latency_ms = (signature_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX))) as u64;
 
             session.config = Some(req.config.clone());
             session.privy_identity_token = req.privy_identity_token.clone();
             session.privy_access_token = req.privy_access_token.clone();
+            session.signature_verification_latency_ms = Some(signature_latency_ms);
+            session.onboarding.current_step = "ready_to_sign".to_string();
+            session.onboarding.completed = true;
+            if session.onboarding.objective.is_none() {
+                session.onboarding.objective = req.config.inference_summary.clone();
+            }
+            session.onboarding.missing_fields.clear();
+            session.onboarding.step4_payload = Some(FrontdoorOnboardingStep4Payload {
+                ready_to_sign: true,
+                confirmation_required: false,
+                unresolved_required_fields: Vec::new(),
+                signature_action: "Signature verification complete. Provisioning in progress."
+                    .to_string(),
+            });
+            session.onboarding.updated_at = Utc::now();
+            self.persist_onboarding_transcript(session)?;
+            push_timeline_event(
+                session,
+                "signature_verified",
+                "awaiting_signature",
+                "Wallet signature verified",
+                "system",
+            );
+
+            let preflight = evaluate_funding_preflight(session, &req.config);
+            session.funding_preflight = preflight.clone();
+            if preflight.status != "passed" {
+                session.status = SessionStatus::Failed;
+                session.updated_at = Utc::now();
+                session.detail = format!(
+                    "Funding preflight failed ({})",
+                    preflight.failure_category.as_deref().unwrap_or("policy")
+                );
+                session.error = Some(format!(
+                    "funding preflight failed: {}",
+                    preflight.failure_category.as_deref().unwrap_or("policy")
+                ));
+                let detail = session.detail.clone();
+                push_timeline_event(
+                    session,
+                    "funding_preflight_failed",
+                    "failed",
+                    &detail,
+                    "system",
+                );
+                let summary = todo_status_summary(&build_gateway_todos(session));
+                push_timeline_event(session, "todo_snapshot", "failed", &summary, "system");
+                return Err(session
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "funding preflight failed".to_string()));
+            }
+            push_timeline_event(
+                session,
+                "funding_preflight_passed",
+                "awaiting_signature",
+                "Funding preflight checks passed",
+                "system",
+            );
+
             session.status = SessionStatus::Provisioning;
             session.updated_at = Utc::now();
             session.error = None;
             session.detail = "Provisioning dedicated enclave...".to_string();
+            session.provisioning_started_at = Some(Utc::now());
+            push_timeline_event(
+                session,
+                "provisioning_started",
+                "provisioning",
+                "Provision command queued",
+                "system",
+            );
+            let summary = todo_status_summary(&build_gateway_todos(session));
+            push_timeline_event(session, "todo_snapshot", "provisioning", &summary, "system");
         }
 
         let svc = Arc::clone(&self);
@@ -486,6 +684,520 @@ impl FrontdoorService {
         Ok((total, filtered))
     }
 
+    pub async fn list_sessions_full(
+        &self,
+        wallet_filter: Option<&str>,
+        limit: usize,
+    ) -> Result<(usize, Vec<FrontdoorSessionResponse>), String> {
+        let normalized_wallet = match wallet_filter {
+            Some(raw) => Some(normalize_wallet_address(raw).ok_or_else(|| {
+                "wallet_address must be a 0x-prefixed 40-hex address".to_string()
+            })?),
+            None => None,
+        };
+
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+
+        let mut filtered: Vec<FrontdoorSessionResponse> = state
+            .sessions
+            .values()
+            .filter(|session| match normalized_wallet.as_ref() {
+                Some(wallet) => &session.wallet_address == wallet,
+                None => true,
+            })
+            .map(render_session_response)
+            .collect();
+        filtered.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+
+        let total = filtered.len();
+        let capped_limit = limit.min(100);
+        filtered.truncate(capped_limit);
+        Ok((total, filtered))
+    }
+
+    pub fn experience_manifest(&self) -> FrontdoorExperienceManifestResponse {
+        FrontdoorExperienceManifestResponse {
+            manifest_version: 1,
+            steps: vec![
+                FrontdoorExperienceStep {
+                    step_id: "identity".to_string(),
+                    title: "Identity".to_string(),
+                    purpose_id: "frontdoor.identity".to_string(),
+                    user_value: "Bind wallet ownership before any privileged action.".to_string(),
+                    backend_contract: "POST /api/frontdoor/challenge".to_string(),
+                    artifact_binding: "challenge_message".to_string(),
+                    state_inputs: vec!["wallet_address".to_string(), "chain_id".to_string()],
+                    success_state: "awaiting_signature".to_string(),
+                    failure_state: "challenge_rejected".to_string(),
+                },
+                FrontdoorExperienceStep {
+                    step_id: "policy".to_string(),
+                    title: "Policy".to_string(),
+                    purpose_id: "frontdoor.policy".to_string(),
+                    user_value: "Generate and validate launch policy from user intent.".to_string(),
+                    backend_contract: "POST /api/frontdoor/suggest-config".to_string(),
+                    artifact_binding: "frontdoor_user_config".to_string(),
+                    state_inputs: vec![
+                        "intent".to_string(),
+                        "profile_domain".to_string(),
+                        "gateway_auth_key".to_string(),
+                    ],
+                    success_state: "config_validated".to_string(),
+                    failure_state: "config_invalid".to_string(),
+                },
+                FrontdoorExperienceStep {
+                    step_id: "verification".to_string(),
+                    title: "Verification".to_string(),
+                    purpose_id: "frontdoor.verification".to_string(),
+                    user_value: "Verify wallet signature and preflight readiness.".to_string(),
+                    backend_contract: "POST /api/frontdoor/verify".to_string(),
+                    artifact_binding: "signature_receipt".to_string(),
+                    state_inputs: vec![
+                        "session_id".to_string(),
+                        "wallet_address".to_string(),
+                        "signature".to_string(),
+                        "config".to_string(),
+                    ],
+                    success_state: "provisioning".to_string(),
+                    failure_state: "verification_failed".to_string(),
+                },
+                FrontdoorExperienceStep {
+                    step_id: "provisioning".to_string(),
+                    title: "Provisioning".to_string(),
+                    purpose_id: "frontdoor.provisioning".to_string(),
+                    user_value: "Launch and hand off to a dedicated runtime endpoint.".to_string(),
+                    backend_contract: "GET /api/frontdoor/session/{session_id}".to_string(),
+                    artifact_binding: "provisioning_receipt".to_string(),
+                    state_inputs: vec!["session_id".to_string()],
+                    success_state: "ready".to_string(),
+                    failure_state: "failed".to_string(),
+                },
+            ],
+            capabilities: vec![
+                "wallet_signature_proof".to_string(),
+                "typed_policy_config".to_string(),
+                "session_timeline".to_string(),
+                "gateway_todo_feed".to_string(),
+                "runtime_controls".to_string(),
+            ],
+            constraints: vec![
+                "wallet_binding_required".to_string(),
+                "preflight_required_before_provisioning".to_string(),
+                "fallback_receipt_policy_enforced".to_string(),
+                "terminal_success_is_server_driven".to_string(),
+            ],
+            evidence_labels: vec![
+                FrontdoorEvidenceLabel {
+                    key: "intent".to_string(),
+                    description: "User-provided objective and config intent.".to_string(),
+                },
+                FrontdoorEvidenceLabel {
+                    key: "receipt".to_string(),
+                    description: "Provisioning/session outcomes and status transitions."
+                        .to_string(),
+                },
+                FrontdoorEvidenceLabel {
+                    key: "verification".to_string(),
+                    description: "Verification backend, level, fallback posture, and latency."
+                        .to_string(),
+                },
+            ],
+        }
+    }
+
+    pub async fn onboarding_state(
+        &self,
+        session_id: Uuid,
+    ) -> Option<FrontdoorOnboardingStateResponse> {
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+        let session = state.sessions.get(&session_id)?;
+        Some(render_onboarding_state(session))
+    }
+
+    pub async fn onboarding_transcript(
+        &self,
+        session_id: Uuid,
+    ) -> Option<FrontdoorOnboardingTranscriptArtifactResponse> {
+        {
+            let mut state = self.state.write().await;
+            purge_expired_sessions(&mut state);
+            if let Some(session) = state.sessions.get(&session_id) {
+                return Some(render_onboarding_transcript_artifact(session));
+            }
+        }
+
+        let path = onboarding_transcript_path(&self.store_path, session_id);
+        let data = std::fs::read(path).ok()?;
+        serde_json::from_slice::<FrontdoorOnboardingTranscriptArtifactResponse>(&data).ok()
+    }
+
+    pub async fn onboarding_chat(
+        &self,
+        req: FrontdoorOnboardingChatRequest,
+    ) -> Result<FrontdoorOnboardingChatResponse, String> {
+        let session_id = Uuid::parse_str(req.session_id.trim())
+            .map_err(|_| "session_id must be a valid UUID".to_string())?;
+        let message = req.message.trim();
+        if message.is_empty() {
+            return Err("message must be non-empty".to_string());
+        }
+
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+        let session = state
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+
+        let now = Utc::now();
+        session.onboarding.transcript.push(OnboardingTurnState {
+            role: "user".to_string(),
+            message: message.to_string(),
+            created_at: now,
+        });
+
+        let assistant_message = match session.onboarding.current_step.as_str() {
+            "capture_objective" => {
+                session.onboarding.objective = Some(message.to_string());
+                session.onboarding.step2_payload = Some(build_onboarding_step2_payload(
+                    &session.wallet_address,
+                    message,
+                ));
+                session.onboarding.step3_payload = Some(build_onboarding_step3_payload(
+                    &session.onboarding.captured_variables,
+                ));
+                session.onboarding.step4_payload = None;
+                session.onboarding.current_step = "propose_plan".to_string();
+                session.onboarding.completed = false;
+                session.onboarding.missing_fields =
+                    unresolved_required_fields(&session.onboarding.step3_payload);
+                "Step 2 complete. Proposed config, risk posture, and module plan are generated. Reply 'confirm plan' to continue or provide a revised objective.".to_string()
+            }
+            "propose_plan" => {
+                let lower = message.to_ascii_lowercase();
+                if onboarding_plan_confirmed(&lower) {
+                    session.onboarding.step3_payload = Some(build_onboarding_step3_payload(
+                        &session.onboarding.captured_variables,
+                    ));
+                    session.onboarding.missing_fields =
+                        unresolved_required_fields(&session.onboarding.step3_payload);
+                    session.onboarding.current_step = "confirm_and_sign".to_string();
+                    session.onboarding.step4_payload = Some(build_onboarding_step4_payload(
+                        &session.onboarding.missing_fields,
+                    ));
+                    if !session.onboarding.missing_fields.is_empty() {
+                        session.onboarding.current_step = "collect_required_variables".to_string();
+                        format!(
+                            "Step 3 required variables are still unresolved: {}. Provide key=value assignments.",
+                            session.onboarding.missing_fields.join(", ")
+                        )
+                    } else {
+                        "Step 4 ready. Reply 'confirm sign' to complete onboarding and proceed to signature verification.".to_string()
+                    }
+                } else {
+                    session.onboarding.objective = Some(message.to_string());
+                    session.onboarding.step2_payload = Some(build_onboarding_step2_payload(
+                        &session.wallet_address,
+                        message,
+                    ));
+                    session.onboarding.step3_payload = Some(build_onboarding_step3_payload(
+                        &session.onboarding.captured_variables,
+                    ));
+                    session.onboarding.step4_payload = None;
+                    session.onboarding.missing_fields =
+                        unresolved_required_fields(&session.onboarding.step3_payload);
+                    "Step 2 updated. Reply 'confirm plan' when the proposed policy and modules are acceptable.".to_string()
+                }
+            }
+            "collect_required_variables" => {
+                let assignments = parse_onboarding_assignments(message);
+                for (field, value) in assignments {
+                    session.onboarding.captured_variables.insert(field, value);
+                }
+                session.onboarding.step3_payload = Some(build_onboarding_step3_payload(
+                    &session.onboarding.captured_variables,
+                ));
+                session.onboarding.missing_fields =
+                    unresolved_required_fields(&session.onboarding.step3_payload);
+                if session.onboarding.missing_fields.is_empty() {
+                    session.onboarding.current_step = "confirm_and_sign".to_string();
+                    session.onboarding.step4_payload = Some(build_onboarding_step4_payload(
+                        &session.onboarding.missing_fields,
+                    ));
+                    "Step 3 complete. Reply 'confirm sign' to finalize onboarding and continue to wallet signature verification.".to_string()
+                } else {
+                    format!(
+                        "Step 3 updated. Remaining required variables: {}.",
+                        session.onboarding.missing_fields.join(", ")
+                    )
+                }
+            }
+            "confirm_and_sign" => {
+                let lower = message.to_ascii_lowercase();
+                if onboarding_signature_confirmed(&lower)
+                    && session.onboarding.missing_fields.is_empty()
+                {
+                    session.onboarding.current_step = "ready_to_sign".to_string();
+                    session.onboarding.completed = true;
+                    session.onboarding.step4_payload = Some(FrontdoorOnboardingStep4Payload {
+                        ready_to_sign: true,
+                        confirmation_required: false,
+                        unresolved_required_fields: Vec::new(),
+                        signature_action:
+                            "Submit POST /api/frontdoor/verify with challenge signature."
+                                .to_string(),
+                    });
+                    "Onboarding complete. Submit signature verification to trigger provisioning."
+                        .to_string()
+                } else if !session.onboarding.missing_fields.is_empty() {
+                    session.onboarding.current_step = "collect_required_variables".to_string();
+                    session.onboarding.step4_payload = Some(build_onboarding_step4_payload(
+                        &session.onboarding.missing_fields,
+                    ));
+                    format!(
+                        "Cannot finalize yet. Missing required variables: {}.",
+                        session.onboarding.missing_fields.join(", ")
+                    )
+                } else {
+                    "Step 4 pending confirmation. Reply 'confirm sign' to complete onboarding."
+                        .to_string()
+                }
+            }
+            "ready_to_sign" => {
+                session.onboarding.completed = true;
+                "Onboarding already complete. Continue with signature verification.".to_string()
+            }
+            _ => "Onboarding state advanced. Continue to signature and provisioning.".to_string(),
+        };
+
+        session.onboarding.updated_at = now;
+        session.onboarding.transcript.push(OnboardingTurnState {
+            role: "assistant".to_string(),
+            message: assistant_message.clone(),
+            created_at: Utc::now(),
+        });
+        self.persist_onboarding_transcript(session)?;
+        push_timeline_event(
+            session,
+            "onboarding_chat",
+            session.status.as_str(),
+            "Onboarding transcript updated",
+            "user",
+        );
+
+        Ok(FrontdoorOnboardingChatResponse {
+            session_id: session.id.to_string(),
+            assistant_message,
+            state: render_onboarding_state(session),
+        })
+    }
+
+    pub async fn session_timeline(
+        &self,
+        session_id: Uuid,
+    ) -> Option<FrontdoorSessionTimelineResponse> {
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+        let session = state.sessions.get(&session_id)?;
+        Some(FrontdoorSessionTimelineResponse {
+            session_id: session.id.to_string(),
+            events: session
+                .timeline
+                .iter()
+                .map(|event| FrontdoorSessionTimelineEvent {
+                    seq_id: event.seq_id,
+                    event_type: event.event_type.clone(),
+                    status: event.status.clone(),
+                    detail: event.detail.clone(),
+                    actor: event.actor.clone(),
+                    created_at: event.created_at.to_rfc3339(),
+                })
+                .collect(),
+        })
+    }
+
+    pub async fn verification_explanation(
+        &self,
+        session_id: Uuid,
+    ) -> Option<FrontdoorVerificationExplanationResponse> {
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+        let session = state.sessions.get(&session_id)?;
+        let config = session.config.as_ref();
+        Some(FrontdoorVerificationExplanationResponse {
+            session_id: session.id.to_string(),
+            backend: config
+                .map(|c| c.verification_backend.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            level: verification_assurance_level(config),
+            fallback_used: config
+                .map(|c| c.verification_fallback_enabled)
+                .unwrap_or(false),
+            latency_ms: session.signature_verification_latency_ms.unwrap_or(0),
+            failure_reason: session.error.clone(),
+        })
+    }
+
+    pub async fn runtime_control(
+        &self,
+        session_id: Uuid,
+        req: FrontdoorRuntimeControlRequest,
+    ) -> Result<FrontdoorRuntimeControlResponse, String> {
+        let action = req.action.trim().to_ascii_lowercase();
+        if action.is_empty() {
+            return Err("action is required".to_string());
+        }
+        let actor = req
+            .actor
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("frontdoor_operator");
+
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+        let session = state
+            .sessions
+            .get_mut(&session_id)
+            .ok_or_else(|| "session not found".to_string())?;
+
+        let (status, detail) = match action.as_str() {
+            "pause" => {
+                if matches!(session.runtime_state, RuntimeState::Terminated) {
+                    ("blocked", "Runtime already terminated")
+                } else if matches!(session.runtime_state, RuntimeState::Paused) {
+                    ("noop", "Runtime already paused")
+                } else {
+                    session.runtime_state = RuntimeState::Paused;
+                    ("applied", "Runtime paused")
+                }
+            }
+            "resume" => {
+                if matches!(session.runtime_state, RuntimeState::Terminated) {
+                    ("blocked", "Runtime already terminated")
+                } else if matches!(session.runtime_state, RuntimeState::Running) {
+                    ("noop", "Runtime already running")
+                } else {
+                    session.runtime_state = RuntimeState::Running;
+                    ("applied", "Runtime resumed")
+                }
+            }
+            "terminate" => {
+                if matches!(session.runtime_state, RuntimeState::Terminated) {
+                    ("noop", "Runtime already terminated")
+                } else {
+                    session.runtime_state = RuntimeState::Terminated;
+                    ("applied", "Runtime terminated")
+                }
+            }
+            "rotate_auth_key" => {
+                if let Some(cfg) = session.config.as_mut() {
+                    cfg.gateway_auth_key = generate_gateway_auth_key();
+                    ("applied", "Gateway auth key rotated")
+                } else {
+                    ("blocked", "Session config not available")
+                }
+            }
+            _ => {
+                return Err(
+                    "action must be one of: pause, resume, terminate, rotate_auth_key".to_string(),
+                );
+            }
+        };
+
+        session.updated_at = Utc::now();
+        push_timeline_event(
+            session,
+            "runtime_control",
+            session.status.as_str(),
+            &format!("action={action}; status={status}; detail={detail}"),
+            actor,
+        );
+        let summary = todo_status_summary(&build_gateway_todos(session));
+        push_timeline_event(
+            session,
+            "todo_snapshot",
+            session.status.as_str(),
+            &summary,
+            actor,
+        );
+
+        Ok(FrontdoorRuntimeControlResponse {
+            session_id: session.id.to_string(),
+            action,
+            status: status.to_string(),
+            runtime_state: session.runtime_state.as_str().to_string(),
+            detail: detail.to_string(),
+            updated_at: session.updated_at.to_rfc3339(),
+        })
+    }
+
+    pub async fn gateway_todos_for_session(
+        &self,
+        session_id: Uuid,
+    ) -> Option<FrontdoorGatewayTodosResponse> {
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+        let session = state.sessions.get(&session_id)?;
+        Some(build_gateway_todos(session))
+    }
+
+    pub async fn gateway_todos(
+        &self,
+        wallet_filter: Option<&str>,
+        session_id: Option<Uuid>,
+        limit: usize,
+    ) -> Result<(usize, Vec<FrontdoorGatewayTodosResponse>), String> {
+        let normalized_wallet = match wallet_filter {
+            Some(raw) => Some(normalize_wallet_address(raw).ok_or_else(|| {
+                "wallet_address must be a 0x-prefixed 40-hex address".to_string()
+            })?),
+            None => None,
+        };
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+
+        let mut filtered: Vec<FrontdoorGatewayTodosResponse> = state
+            .sessions
+            .values()
+            .filter(|session| {
+                if let Some(expected) = session_id
+                    && session.id != expected
+                {
+                    return false;
+                }
+                if let Some(wallet) = normalized_wallet.as_ref()
+                    && &session.wallet_address != wallet
+                {
+                    return false;
+                }
+                true
+            })
+            .map(build_gateway_todos)
+            .collect();
+        filtered.sort_by(|a, b| b.session_id.cmp(&a.session_id));
+        let total = filtered.len();
+        filtered.truncate(limit.min(100));
+        Ok((total, filtered))
+    }
+
+    pub async fn funding_preflight(
+        &self,
+        session_id: Uuid,
+    ) -> Option<FrontdoorFundingPreflightResponse> {
+        let mut state = self.state.write().await;
+        purge_expired_sessions(&mut state);
+        let session = state.sessions.get_mut(&session_id)?;
+        if session.funding_preflight.status == "pending"
+            && let Some(cfg) = session.config.clone()
+        {
+            session.funding_preflight = evaluate_funding_preflight(session, &cfg);
+        }
+        Some(render_funding_preflight_response(session))
+    }
+
     async fn run_provision(self: Arc<Self>, session_id: Uuid) {
         let (
             wallet,
@@ -497,6 +1209,7 @@ impl FrontdoorService {
             cfg,
             command,
             default_url,
+            allow_default_fallback,
             verify_base_url,
         ) = {
             let state = self.state.read().await;
@@ -516,47 +1229,52 @@ impl FrontdoorService {
                 cfg,
                 self.config.provision_command.clone(),
                 self.config.default_instance_url.clone(),
+                self.config.allow_default_instance_fallback,
                 self.config.verify_app_base_url.clone(),
             )
         };
 
-        let (result, provisioning_source) = if let Some(cmd_template) = command {
-            let command_input = ProvisionCommandInput {
-                session_id,
-                wallet: &wallet,
-                privy_user_id: privy_user.as_deref(),
-                privy_identity_token: privy_identity_token.as_deref(),
-                privy_access_token: privy_access_token.as_deref(),
-                chain_id,
-                version,
-                config: &cfg,
-                verify_base_url: verify_base_url.as_deref(),
-            };
-            (
-                execute_provision_command(&cmd_template, &command_input).await,
-                ProvisioningSource::Command,
-            )
-        } else if let Some(url) = default_url {
-            (
-                Ok(ProvisioningResult {
-                    instance_url: url.clone(),
-                    verify_url: if looks_like_verify_url(&url) {
-                        Some(url)
-                    } else {
-                        None
-                    },
-                    eigen_app_id: None,
-                }),
+        let normalized_default_url = normalize_default_instance_url(default_url.as_deref());
+        let command_input = ProvisionCommandInput {
+            session_id,
+            wallet: &wallet,
+            privy_user_id: privy_user.as_deref(),
+            privy_identity_token: privy_identity_token.as_deref(),
+            privy_access_token: privy_access_token.as_deref(),
+            chain_id,
+            version,
+            config: &cfg,
+            verify_base_url: verify_base_url.as_deref(),
+        };
+        let (result, provisioning_source) = match command.as_deref().map(str::trim) {
+            Some(raw_template) if !raw_template.is_empty() => {
+                match parse_provision_command_template(raw_template) {
+                    Ok(parsed_template) => (
+                        execute_provision_command(parsed_template.as_str(), &command_input).await,
+                        ProvisioningSource::Command,
+                    ),
+                    Err(_template_err)
+                        if allow_default_fallback && normalized_default_url.is_ok() =>
+                    {
+                        (
+                            provision_from_default_url(&normalized_default_url),
+                            ProvisioningSource::DefaultInstanceUrl,
+                        )
+                    }
+                    Err(template_err) => (
+                        Err(format!("provision_command is malformed: {template_err}")),
+                        ProvisioningSource::Unconfigured,
+                    ),
+                }
+            }
+            _ if allow_default_fallback && normalized_default_url.is_ok() => (
+                provision_from_default_url(&normalized_default_url),
                 ProvisioningSource::DefaultInstanceUrl,
-            )
-        } else {
-            (
-                Err(
-                    "No provisioning backend configured (set GATEWAY_FRONTDOOR_PROVISION_COMMAND or GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL)"
-                        .to_string(),
-                ),
+            ),
+            _ => (
+                Err("No valid provisioning command configured. Static fallback is disabled; set GATEWAY_FRONTDOOR_PROVISION_COMMAND or opt in to GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK=1 with GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL.".to_string()),
                 ProvisioningSource::Unconfigured,
-            )
+            ),
         };
 
         let mut state = self.state.write().await;
@@ -576,10 +1294,16 @@ impl FrontdoorService {
                     session.error = None;
                     session.detail = "Enclave is live. Redirect ready.".to_string();
                     session.updated_at = Utc::now();
+                    session.provisioning_started_at = None;
 
                     tracing::info!(
                         session_id = %session.id,
                         wallet = %session.wallet_address,
+                        verification_backend = %session
+                            .config
+                            .as_ref()
+                            .map(|cfg| cfg.verification_backend.as_str())
+                            .unwrap_or("unknown"),
                         provisioning_source = provisioning_source.as_str(),
                         verification_level = %verification_assurance_level(session.config.as_ref()),
                         eigen_app_id = ?session.eigen_app_id,
@@ -587,6 +1311,15 @@ impl FrontdoorService {
                         launched_on_eigencloud = ?session_launched_on_eigencloud(session),
                         "Frontdoor provisioning completed"
                     );
+                    push_timeline_event(
+                        session,
+                        "provisioning_completed",
+                        "ready",
+                        "Provisioning completed and instance URL available",
+                        "system",
+                    );
+                    let summary = todo_status_summary(&build_gateway_todos(session));
+                    push_timeline_event(session, "todo_snapshot", "ready", &summary, "system");
 
                     wallet_record = Some(WalletSessionRecord {
                         version: session.version,
@@ -600,15 +1333,35 @@ impl FrontdoorService {
                     session.detail = "Provisioning failed".to_string();
                     session.error = Some(err);
                     session.updated_at = Utc::now();
+                    session.provisioning_started_at = None;
 
                     tracing::warn!(
                         session_id = %session.id,
                         wallet = %session.wallet_address,
+                        verification_backend = %session
+                            .config
+                            .as_ref()
+                            .map(|cfg| cfg.verification_backend.as_str())
+                            .unwrap_or("unknown"),
                         provisioning_source = provisioning_source.as_str(),
                         verification_level = %verification_assurance_level(session.config.as_ref()),
+                        eigen_app_id = ?session.eigen_app_id,
                         error = ?session.error,
                         "Frontdoor provisioning failed"
                     );
+                    let error_detail = session
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Provisioning command failed".to_string());
+                    push_timeline_event(
+                        session,
+                        "provisioning_failed",
+                        "failed",
+                        &error_detail,
+                        "system",
+                    );
+                    let summary = todo_status_summary(&build_gateway_todos(session));
+                    push_timeline_event(session, "todo_snapshot", "failed", &summary, "system");
                 }
             }
         }
@@ -619,9 +1372,32 @@ impl FrontdoorService {
                 wallets: state.wallets.clone(),
             };
             if let Err(err) = persist_wallet_store(&self.store_path, &store) {
-                tracing::warn!("Failed to persist frontdoor wallet session store: {err}");
+                tracing::warn!(
+                    session_id = %session_id,
+                    wallet = %wallet,
+                    verification_backend = %cfg.verification_backend,
+                    verification_level = %verification_assurance_level(Some(&cfg)),
+                    provisioning_source = "wallet_store",
+                    eigen_app_id = ?None::<String>,
+                    error = %err,
+                    "Failed to persist frontdoor wallet session store"
+                );
             }
         }
+    }
+
+    fn persist_onboarding_transcript(&self, session: &ProvisioningSession) -> Result<(), String> {
+        let artifact = render_onboarding_transcript_artifact(session);
+        let path = onboarding_transcript_path(&self.store_path, session.id);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed creating onboarding artifact dir: {e}"))?;
+        }
+        let data = serde_json::to_vec_pretty(&artifact)
+            .map_err(|e| format!("failed serializing onboarding transcript artifact: {e}"))?;
+        std::fs::write(path, data)
+            .map_err(|e| format!("failed writing onboarding transcript artifact: {e}"))?;
+        Ok(())
     }
 }
 
@@ -633,11 +1409,117 @@ fn default_wallet_store_path() -> PathBuf {
         .join("wallet_sessions.json")
 }
 
+fn onboarding_artifact_id(session_id: Uuid) -> String {
+    format!("frontdoor.onboarding_transcript.{session_id}")
+}
+
+fn onboarding_transcript_path(store_path: &std::path::Path, session_id: Uuid) -> PathBuf {
+    store_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("onboarding")
+        .join(format!("{session_id}.json"))
+}
+
 #[derive(Debug, Clone)]
 struct ProvisioningResult {
     instance_url: String,
     verify_url: Option<String>,
     eigen_app_id: Option<String>,
+}
+
+fn normalize_default_instance_url(raw: Option<&str>) -> Result<Option<String>, String> {
+    let Some(candidate) = raw.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    validate_optional_url(candidate, &["http", "https"], "default_instance_url")?;
+    Ok(Some(candidate.to_string()))
+}
+
+fn provision_from_default_url(
+    normalized_default_url: &Result<Option<String>, String>,
+) -> Result<ProvisioningResult, String> {
+    match normalized_default_url {
+        Ok(Some(url)) => Ok(ProvisioningResult {
+            instance_url: url.clone(),
+            verify_url: if looks_like_verify_url(url) {
+                Some(url.clone())
+            } else {
+                None
+            },
+            eigen_app_id: None,
+        }),
+        Ok(None) => Err("default_instance_url fallback requested but not configured".to_string()),
+        Err(err) => Err(format!("default_instance_url is invalid: {err}")),
+    }
+}
+
+fn parse_provision_command_template(template: &str) -> Result<String, String> {
+    let trimmed = template.trim();
+    if trimmed.is_empty() {
+        return Err("provision command template is empty".to_string());
+    }
+
+    let allowed_placeholders: HashSet<&str> = HashSet::from([
+        "session_id",
+        "wallet_address",
+        "privy_user_id",
+        "privy_identity_token",
+        "privy_access_token",
+        "chain_id",
+        "version",
+        "config_version",
+        "profile_domain",
+        "domain_overrides_json",
+        "profile_name",
+        "custody_mode",
+        "operator_wallet_address",
+        "user_wallet_address",
+        "vault_address",
+        "gateway_auth_key",
+        "eigencloud_auth_key",
+        "verification_backend",
+        "verification_eigencloud_endpoint",
+        "verification_eigencloud_auth_scheme",
+        "verification_eigencloud_timeout_ms",
+        "verification_fallback_enabled",
+        "verification_fallback_signing_key_id",
+        "verification_fallback_chain_path",
+        "verification_fallback_require_signed_receipts",
+        "verify_app_base_url",
+        "inference_summary",
+        "inference_confidence",
+        "config_json",
+        "config_b64",
+    ]);
+
+    let bytes = trimmed.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'{' || (idx > 0 && bytes[idx - 1] == b'$') {
+            idx = idx.saturating_add(1);
+            continue;
+        }
+        let mut end = idx.saturating_add(1);
+        while end < bytes.len() && bytes[end] != b'}' {
+            end = end.saturating_add(1);
+        }
+        if end >= bytes.len() {
+            return Err("provision command template has unmatched '{'".to_string());
+        }
+        let token = &trimmed[idx + 1..end];
+        if !token.is_empty()
+            && token
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            && !allowed_placeholders.contains(token)
+        {
+            return Err(format!("unsupported placeholder '{{{token}}}'"));
+        }
+        idx = end.saturating_add(1);
+    }
+
+    Ok(trimmed.to_string())
 }
 
 fn is_non_empty_config_value(value: Option<&str>) -> bool {
@@ -674,8 +1556,726 @@ fn verification_assurance_level(config: Option<&FrontdoorUserConfig>) -> String 
     }
 }
 
+fn default_onboarding_state(session_id: Uuid, now: DateTime<Utc>) -> OnboardingState {
+    OnboardingState {
+        current_step: "capture_objective".to_string(),
+        completed: false,
+        objective: None,
+        missing_fields: vec![
+            "profile_name".to_string(),
+            "gateway_auth_key".to_string(),
+            "accept_terms".to_string(),
+        ],
+        step2_payload: None,
+        step3_payload: Some(build_onboarding_step3_payload(&HashMap::new())),
+        step4_payload: Some(build_onboarding_step4_payload(&[
+            "profile_name".to_string(),
+            "gateway_auth_key".to_string(),
+            "accept_terms".to_string(),
+        ])),
+        transcript_artifact_id: Some(onboarding_artifact_id(session_id)),
+        captured_variables: HashMap::new(),
+        transcript: vec![OnboardingTurnState {
+            role: "assistant".to_string(),
+            message:
+                "Describe your objective. The frontdoor flow will produce a validated launch plan."
+                    .to_string(),
+            created_at: now,
+        }],
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+fn build_onboarding_step2_payload(
+    connected_wallet: &str,
+    objective: &str,
+) -> FrontdoorOnboardingStep2Payload {
+    let mut assumptions = Vec::new();
+    let mut warnings = Vec::new();
+    let mut config = default_frontdoor_user_config(connected_wallet, None, "general");
+    apply_intent_overrides(
+        &mut config,
+        objective,
+        connected_wallet,
+        &mut assumptions,
+        &mut warnings,
+    );
+    normalize_suggested_config(&mut config, connected_wallet, &mut assumptions);
+    let module_plan = frontdoor_domain_profiles()
+        .into_iter()
+        .find(|profile| profile.domain == config.profile_domain)
+        .map(|profile| profile.default_modules)
+        .unwrap_or_else(|| vec!["general".to_string()]);
+    let warnings_suffix = if warnings.is_empty() {
+        String::new()
+    } else {
+        format!("; warnings={}", warnings.join(" | "))
+    };
+
+    FrontdoorOnboardingStep2Payload {
+        objective: objective.trim().to_string(),
+        proposed_profile_domain: config.profile_domain.clone(),
+        proposed_profile_name: config.profile_name.clone(),
+        proposed_module_plan: module_plan,
+        proposed_verification_backend: config.verification_backend.clone(),
+        proposed_custody_mode: config.custody_mode.clone(),
+        risk_summary: format!(
+            "paper_live_policy={}; max_position_size_usd={}; max_leverage={}; fallback_signed_receipts={}{warnings_suffix}",
+            config.paper_live_policy,
+            config.max_position_size_usd,
+            config.max_leverage,
+            config.verification_fallback_require_signed_receipts
+        ),
+    }
+}
+
+fn build_onboarding_step3_payload(
+    captured_variables: &HashMap<String, String>,
+) -> FrontdoorOnboardingStep3Payload {
+    let mut required_variables = Vec::new();
+    for (field, rationale) in [
+        (
+            "profile_name",
+            "Stable profile identifier used in policy and receipt records.",
+        ),
+        (
+            "gateway_auth_key",
+            "Gateway auth key secures runtime API access after launch.",
+        ),
+        (
+            "accept_terms",
+            "Policy gates require explicit terms acceptance before provisioning.",
+        ),
+    ] {
+        let value = captured_variables
+            .get(field)
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let status = match field {
+            "profile_name" => {
+                if value.is_empty() {
+                    "open"
+                } else if value.len() <= 64 {
+                    "resolved"
+                } else {
+                    "blocked"
+                }
+            }
+            "gateway_auth_key" => {
+                if value.is_empty() {
+                    "open"
+                } else if onboarding_gateway_auth_key_supplied(&value) {
+                    "resolved"
+                } else {
+                    "blocked"
+                }
+            }
+            "accept_terms" => {
+                if value.is_empty() {
+                    "open"
+                } else if matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "yes") {
+                    "resolved"
+                } else {
+                    "blocked"
+                }
+            }
+            _ => "open",
+        };
+        required_variables.push(FrontdoorOnboardingRequiredVariable {
+            field: field.to_string(),
+            required: true,
+            status: status.to_string(),
+            rationale: rationale.to_string(),
+        });
+    }
+
+    let unresolved_required_count = required_variables
+        .iter()
+        .filter(|variable| variable.required && variable.status != "resolved")
+        .count();
+    let validation_status = if unresolved_required_count == 0 {
+        "ready_for_confirmation"
+    } else {
+        "missing_required_variables"
+    };
+
+    FrontdoorOnboardingStep3Payload {
+        required_variables,
+        unresolved_required_count,
+        validation_status: validation_status.to_string(),
+        rationale: "Populate all required variables to continue to signature confirmation."
+            .to_string(),
+    }
+}
+
+fn build_onboarding_step4_payload(
+    unresolved_required_fields: &[String],
+) -> FrontdoorOnboardingStep4Payload {
+    FrontdoorOnboardingStep4Payload {
+        ready_to_sign: unresolved_required_fields.is_empty(),
+        confirmation_required: true,
+        unresolved_required_fields: unresolved_required_fields.to_vec(),
+        signature_action:
+            "Reply 'confirm sign' to finalize onboarding, then call POST /api/frontdoor/verify."
+                .to_string(),
+    }
+}
+
+fn unresolved_required_fields(payload: &Option<FrontdoorOnboardingStep3Payload>) -> Vec<String> {
+    payload
+        .as_ref()
+        .map(|step| {
+            step.required_variables
+                .iter()
+                .filter(|variable| variable.required && variable.status != "resolved")
+                .map(|variable| variable.field.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_onboarding_assignments(message: &str) -> HashMap<String, String> {
+    let mut assignments = HashMap::new();
+    let normalized_message = message.trim();
+    if normalized_message.is_empty() {
+        return assignments;
+    }
+
+    let lower = normalized_message.to_ascii_lowercase();
+    if lower.contains("accept terms") || lower.contains("i accept") {
+        assignments.insert("accept_terms".to_string(), "true".to_string());
+    }
+
+    for segment in normalized_message.split(['\n', ',', ';']) {
+        let item = segment.trim();
+        if item.is_empty() {
+            continue;
+        }
+        let pair = item
+            .split_once('=')
+            .or_else(|| item.split_once(':'))
+            .map(|(key, value)| (normalize_onboarding_field(key), value.trim().to_string()));
+        if let Some((field, value)) = pair
+            && !field.is_empty()
+            && !value.is_empty()
+        {
+            assignments.insert(field, value);
+        }
+    }
+
+    assignments
+}
+
+fn normalize_onboarding_field(raw: &str) -> String {
+    let field = raw
+        .trim()
+        .to_ascii_lowercase()
+        .replace([' ', '-'], "_")
+        .replace("__", "_");
+    match field.as_str() {
+        "profile" | "name" | "profile_name" => "profile_name".to_string(),
+        "gateway_key" | "auth_key" | "gateway_auth" | "gateway_auth_key" => {
+            "gateway_auth_key".to_string()
+        }
+        "terms" | "accept" | "accept_terms" => "accept_terms".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn onboarding_plan_confirmed(message_lower: &str) -> bool {
+    message_lower.contains("confirm plan")
+        || message_lower.contains("approve plan")
+        || message_lower.contains("proceed plan")
+        || message_lower.trim() == "confirm"
+}
+
+fn onboarding_signature_confirmed(message_lower: &str) -> bool {
+    message_lower.contains("confirm sign")
+        || message_lower.contains("confirm signature")
+        || message_lower.contains("proceed to sign")
+        || message_lower.trim() == "confirm"
+}
+
+fn pending_funding_preflight(now: DateTime<Utc>) -> FundingPreflightState {
+    FundingPreflightState {
+        status: "pending".to_string(),
+        failure_category: None,
+        checks: vec![
+            FundingPreflightCheckState {
+                check_id: "wallet_binding".to_string(),
+                status: "pending".to_string(),
+                detail: "Waiting for verified wallet association.".to_string(),
+            },
+            FundingPreflightCheckState {
+                check_id: "auth_material".to_string(),
+                status: "pending".to_string(),
+                detail: "Waiting for verification backend auth validation.".to_string(),
+            },
+            FundingPreflightCheckState {
+                check_id: "gas_budget".to_string(),
+                status: "pending".to_string(),
+                detail: "Waiting for deterministic gas readiness checks.".to_string(),
+            },
+            FundingPreflightCheckState {
+                check_id: "platform_fee".to_string(),
+                status: "pending".to_string(),
+                detail: "Waiting for deterministic platform-fee checks.".to_string(),
+            },
+        ],
+        updated_at: now,
+    }
+}
+
+fn push_timeline_event(
+    session: &mut ProvisioningSession,
+    event_type: &str,
+    status: &str,
+    detail: &str,
+    actor: &str,
+) {
+    let seq_id = session.next_timeline_seq_id;
+    session.next_timeline_seq_id = session.next_timeline_seq_id.saturating_add(1);
+    session.timeline.push(TimelineEvent {
+        seq_id,
+        event_type: event_type.to_string(),
+        status: status.to_string(),
+        detail: detail.to_string(),
+        actor: actor.to_string(),
+        created_at: Utc::now(),
+    });
+    tracing::info!(
+        session_id = %session.id,
+        wallet = %session.wallet_address,
+        verification_backend = %session
+            .config
+            .as_ref()
+            .map(|cfg| cfg.verification_backend.as_str())
+            .unwrap_or("unknown"),
+        verification_level = %verification_assurance_level(session.config.as_ref()),
+        provisioning_source = %session.provisioning_source.as_str(),
+        eigen_app_id = ?session.eigen_app_id,
+        event_type = event_type,
+        event_status = status,
+        actor = actor,
+        detail = detail,
+        "Frontdoor timeline event"
+    );
+}
+
+fn render_onboarding_state(session: &ProvisioningSession) -> FrontdoorOnboardingStateResponse {
+    FrontdoorOnboardingStateResponse {
+        session_id: session.id.to_string(),
+        current_step: session.onboarding.current_step.clone(),
+        completed: session.onboarding.completed,
+        objective: session.onboarding.objective.clone(),
+        missing_fields: session.onboarding.missing_fields.clone(),
+        step2_payload: session.onboarding.step2_payload.clone(),
+        step3_payload: session.onboarding.step3_payload.clone(),
+        step4_payload: session.onboarding.step4_payload.clone(),
+        transcript_artifact_id: session.onboarding.transcript_artifact_id.clone(),
+        transcript: session
+            .onboarding
+            .transcript
+            .iter()
+            .map(|turn| FrontdoorOnboardingTurn {
+                role: turn.role.clone(),
+                message: turn.message.clone(),
+                created_at: turn.created_at.to_rfc3339(),
+            })
+            .collect(),
+        updated_at: session.onboarding.updated_at.to_rfc3339(),
+    }
+}
+
+fn render_onboarding_transcript_artifact(
+    session: &ProvisioningSession,
+) -> FrontdoorOnboardingTranscriptArtifactResponse {
+    FrontdoorOnboardingTranscriptArtifactResponse {
+        artifact_id: session
+            .onboarding
+            .transcript_artifact_id
+            .clone()
+            .unwrap_or_else(|| onboarding_artifact_id(session.id)),
+        session_id: session.id.to_string(),
+        wallet_address: session.wallet_address.clone(),
+        current_step: session.onboarding.current_step.clone(),
+        completed: session.onboarding.completed,
+        objective: session.onboarding.objective.clone(),
+        step2_payload: session.onboarding.step2_payload.clone(),
+        step3_payload: session.onboarding.step3_payload.clone(),
+        step4_payload: session.onboarding.step4_payload.clone(),
+        transcript: session
+            .onboarding
+            .transcript
+            .iter()
+            .map(|turn| FrontdoorOnboardingTurn {
+                role: turn.role.clone(),
+                message: turn.message.clone(),
+                created_at: turn.created_at.to_rfc3339(),
+            })
+            .collect(),
+        created_at: session.onboarding.created_at.to_rfc3339(),
+        updated_at: session.onboarding.updated_at.to_rfc3339(),
+    }
+}
+
+fn render_funding_preflight_response(
+    session: &ProvisioningSession,
+) -> FrontdoorFundingPreflightResponse {
+    FrontdoorFundingPreflightResponse {
+        session_id: session.id.to_string(),
+        status: session.funding_preflight.status.clone(),
+        failure_category: session.funding_preflight.failure_category.clone(),
+        checks: session
+            .funding_preflight
+            .checks
+            .iter()
+            .map(|check| FrontdoorFundingPreflightCheck {
+                check_id: check.check_id.clone(),
+                status: check.status.clone(),
+                detail: check.detail.clone(),
+            })
+            .collect(),
+        updated_at: session.funding_preflight.updated_at.to_rfc3339(),
+    }
+}
+
+fn build_gateway_todos(session: &ProvisioningSession) -> FrontdoorGatewayTodosResponse {
+    let verification_level = verification_assurance_level(session.config.as_ref());
+    let provisioning_source = session.provisioning_source.as_str().to_string();
+    let module_state = session
+        .config
+        .as_ref()
+        .map(|cfg| format!("profile_domain:{}", cfg.profile_domain))
+        .unwrap_or_else(|| "profile_domain:unknown".to_string());
+    let control_state = session.runtime_state.as_str().to_string();
+    let session_id = session.id.to_string();
+
+    let signature_status = match session.status {
+        SessionStatus::AwaitingSignature => "open",
+        SessionStatus::Provisioning | SessionStatus::Ready => "resolved",
+        SessionStatus::Failed | SessionStatus::Expired => {
+            if session.signature_verification_latency_ms.is_some() {
+                "resolved"
+            } else {
+                "blocked"
+            }
+        }
+    };
+    let funding_status = match session.funding_preflight.status.as_str() {
+        "passed" => "resolved",
+        "failed" => "blocked",
+        "pending" => {
+            if matches!(session.status, SessionStatus::Provisioning) {
+                "in_progress"
+            } else {
+                "open"
+            }
+        }
+        _ => "open",
+    };
+    let provisioning_status = match session.status {
+        SessionStatus::Ready
+            if matches!(session.provisioning_source, ProvisioningSource::Command) =>
+        {
+            "resolved"
+        }
+        SessionStatus::Provisioning => "in_progress",
+        SessionStatus::Failed | SessionStatus::Expired => "blocked",
+        _ if matches!(
+            session.provisioning_source,
+            ProvisioningSource::DefaultInstanceUrl
+        ) =>
+        {
+            "blocked"
+        }
+        _ => "open",
+    };
+    let runtime_status = match session.runtime_state {
+        RuntimeState::Running => "open",
+        RuntimeState::Paused | RuntimeState::Terminated => "resolved",
+    };
+    let fallback_receipt_status = session
+        .config
+        .as_ref()
+        .map(|cfg| {
+            if cfg.verification_fallback_enabled
+                && cfg.verification_fallback_require_signed_receipts
+            {
+                "resolved"
+            } else {
+                "open"
+            }
+        })
+        .unwrap_or("open");
+
+    let mut todos = vec![
+        FrontdoorGatewayTodoItem {
+            todo_id: "sign_authorization_challenge".to_string(),
+            severity: "required".to_string(),
+            status: signature_status.to_string(),
+            priority: 0,
+            entry_blocking: false,
+            owner: "user".to_string(),
+            action: "Sign the wallet challenge and verify session ownership.".to_string(),
+            evidence_refs: FrontdoorTodoEvidenceRefs {
+                session_id: session_id.clone(),
+                provisioning_source: provisioning_source.clone(),
+                verification_level: verification_level.clone(),
+                module_state: module_state.clone(),
+                control_state: control_state.clone(),
+            },
+        },
+        FrontdoorGatewayTodoItem {
+            todo_id: "funding_preflight".to_string(),
+            severity: "required".to_string(),
+            status: funding_status.to_string(),
+            priority: 0,
+            entry_blocking: false,
+            owner: "operator".to_string(),
+            action: "Pass deterministic funding/auth preflight checks before provisioning."
+                .to_string(),
+            evidence_refs: FrontdoorTodoEvidenceRefs {
+                session_id: session_id.clone(),
+                provisioning_source: provisioning_source.clone(),
+                verification_level: verification_level.clone(),
+                module_state: module_state.clone(),
+                control_state: control_state.clone(),
+            },
+        },
+        FrontdoorGatewayTodoItem {
+            todo_id: "dedicated_provisioning".to_string(),
+            severity: "required".to_string(),
+            status: provisioning_status.to_string(),
+            priority: 0,
+            entry_blocking: false,
+            owner: "operator".to_string(),
+            action: "Launch via command provisioning and persist EigenCloud evidence.".to_string(),
+            evidence_refs: FrontdoorTodoEvidenceRefs {
+                session_id: session_id.clone(),
+                provisioning_source: provisioning_source.clone(),
+                verification_level: verification_level.clone(),
+                module_state: module_state.clone(),
+                control_state: control_state.clone(),
+            },
+        },
+        FrontdoorGatewayTodoItem {
+            todo_id: "runtime_hardening".to_string(),
+            severity: "recommended".to_string(),
+            status: runtime_status.to_string(),
+            priority: 0,
+            entry_blocking: false,
+            owner: "operator".to_string(),
+            action: "Apply runtime control posture (pause/resume/terminate) intentionally."
+                .to_string(),
+            evidence_refs: FrontdoorTodoEvidenceRefs {
+                session_id: session_id.clone(),
+                provisioning_source: provisioning_source.clone(),
+                verification_level: verification_level.clone(),
+                module_state: module_state.clone(),
+                control_state: control_state.clone(),
+            },
+        },
+        FrontdoorGatewayTodoItem {
+            todo_id: "signed_fallback_receipts".to_string(),
+            severity: "recommended".to_string(),
+            status: fallback_receipt_status.to_string(),
+            priority: 0,
+            entry_blocking: false,
+            owner: "operator".to_string(),
+            action: "Keep signed fallback receipts enabled for degraded verification paths."
+                .to_string(),
+            evidence_refs: FrontdoorTodoEvidenceRefs {
+                session_id,
+                provisioning_source,
+                verification_level,
+                module_state,
+                control_state,
+            },
+        },
+    ];
+
+    for todo in &mut todos {
+        todo.entry_blocking = todo.severity == "required" && todo.status != "resolved";
+        todo.priority = gateway_todo_priority(todo.severity.as_str(), todo.status.as_str());
+    }
+    todos.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.todo_id.cmp(&b.todo_id))
+    });
+
+    let todo_open_required_count = todos
+        .iter()
+        .filter(|todo| todo.severity == "required" && todo.status != "resolved")
+        .count();
+    let todo_open_recommended_count = todos
+        .iter()
+        .filter(|todo| todo.severity == "recommended" && todo.status != "resolved")
+        .count();
+    let required_todo_ids_in_priority_order = todos
+        .iter()
+        .filter(|todo| todo.severity == "required" && todo.status != "resolved")
+        .map(|todo| todo.todo_id.clone())
+        .collect::<Vec<_>>();
+
+    FrontdoorGatewayTodosResponse {
+        session_id: session.id.to_string(),
+        todo_open_required_count,
+        todo_open_recommended_count,
+        highest_priority: todos.iter().map(|todo| todo.priority).max().unwrap_or(0),
+        has_blocking_required_todos: todo_open_required_count > 0,
+        required_todo_ids_in_priority_order,
+        todo_status_summary: todo_status_summary_counts(&todos),
+        todos,
+    }
+}
+
+fn todo_status_summary(payload: &FrontdoorGatewayTodosResponse) -> String {
+    payload.todo_status_summary.clone()
+}
+
+fn todo_status_summary_counts(todos: &[FrontdoorGatewayTodoItem]) -> String {
+    let mut open = 0usize;
+    let mut blocked = 0usize;
+    let mut in_progress = 0usize;
+    let mut resolved = 0usize;
+    for todo in todos {
+        match todo.status.as_str() {
+            "blocked" => blocked = blocked.saturating_add(1),
+            "in_progress" => in_progress = in_progress.saturating_add(1),
+            "resolved" => resolved = resolved.saturating_add(1),
+            _ => open = open.saturating_add(1),
+        }
+    }
+    format!("open={open};blocked={blocked};in_progress={in_progress};resolved={resolved}")
+}
+
+fn gateway_todo_priority(severity: &str, status: &str) -> u8 {
+    match (severity, status) {
+        ("required", "blocked") => 100,
+        ("required", "open") => 95,
+        ("required", "in_progress") => 90,
+        ("required", "resolved") => 70,
+        ("recommended", "blocked") => 60,
+        ("recommended", "open") => 50,
+        ("recommended", "in_progress") => 45,
+        ("recommended", "resolved") => 20,
+        _ => 10,
+    }
+}
+
+fn evaluate_funding_preflight(
+    session: &ProvisioningSession,
+    config: &FrontdoorUserConfig,
+) -> FundingPreflightState {
+    let wallet_bound = validate_wallet_association(config, &session.wallet_address).is_ok();
+    let auth_ready_default = if config.verification_backend == "eigencloud_primary"
+        && config.verification_eigencloud_auth_scheme == "api_key"
+    {
+        config
+            .eigencloud_auth_key
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+    } else {
+        true
+    };
+
+    let gas_ready = preflight_override_bool(config, "gas_ready").unwrap_or(true);
+    let fee_ready = preflight_override_bool(config, "fee_ready").unwrap_or(true);
+    let auth_ready = preflight_override_bool(config, "auth_ready").unwrap_or(auth_ready_default);
+    let policy_ready =
+        preflight_override_bool(config, "policy_ready").unwrap_or(config.accept_terms);
+
+    let checks = vec![
+        FundingPreflightCheckState {
+            check_id: "wallet_binding".to_string(),
+            status: if wallet_bound { "passed" } else { "failed" }.to_string(),
+            detail: if wallet_bound {
+                "Connected wallet and config wallet association match.".to_string()
+            } else {
+                "Connected wallet does not satisfy custody-mode wallet association.".to_string()
+            },
+        },
+        FundingPreflightCheckState {
+            check_id: "auth_material".to_string(),
+            status: if auth_ready { "passed" } else { "failed" }.to_string(),
+            detail: if auth_ready {
+                "Verification backend auth requirements satisfied.".to_string()
+            } else {
+                "Missing or invalid verification auth material.".to_string()
+            },
+        },
+        FundingPreflightCheckState {
+            check_id: "gas_budget".to_string(),
+            status: if gas_ready { "passed" } else { "failed" }.to_string(),
+            detail: if gas_ready {
+                "Gas readiness checks passed.".to_string()
+            } else {
+                "Insufficient gas readiness for provisioning.".to_string()
+            },
+        },
+        FundingPreflightCheckState {
+            check_id: "platform_fee".to_string(),
+            status: if fee_ready { "passed" } else { "failed" }.to_string(),
+            detail: if fee_ready {
+                "Platform fee readiness checks passed.".to_string()
+            } else {
+                "Insufficient platform fee readiness for provisioning.".to_string()
+            },
+        },
+        FundingPreflightCheckState {
+            check_id: "policy".to_string(),
+            status: if policy_ready { "passed" } else { "failed" }.to_string(),
+            detail: if policy_ready {
+                "Policy acceptance and gating checks passed.".to_string()
+            } else {
+                "Policy checks failed (accept_terms or policy override).".to_string()
+            },
+        },
+    ];
+
+    let failure_category = if !wallet_bound {
+        Some("policy".to_string())
+    } else if !auth_ready {
+        Some("auth".to_string())
+    } else if !policy_ready {
+        Some("policy".to_string())
+    } else if !gas_ready {
+        Some("gas".to_string())
+    } else if !fee_ready {
+        Some("fee".to_string())
+    } else {
+        None
+    };
+
+    FundingPreflightState {
+        status: if failure_category.is_none() {
+            "passed".to_string()
+        } else {
+            "failed".to_string()
+        },
+        failure_category,
+        checks,
+        updated_at: Utc::now(),
+    }
+}
+
+fn preflight_override_bool(config: &FrontdoorUserConfig, key: &str) -> Option<bool> {
+    config
+        .domain_overrides
+        .get("frontdoor_preflight")
+        .and_then(|value| value.as_object())
+        .and_then(|map| map.get(key))
+        .and_then(|value| value.as_bool())
+}
+
 fn render_session_response(session: &ProvisioningSession) -> FrontdoorSessionResponse {
     let config = session.config.as_ref();
+    let todos = build_gateway_todos(session);
+    let verification_level = verification_assurance_level(config);
     FrontdoorSessionResponse {
         session_id: session.id.to_string(),
         wallet_address: session.wallet_address.clone(),
@@ -685,12 +2285,17 @@ fn render_session_response(session: &ProvisioningSession) -> FrontdoorSessionRes
         detail: session.detail.clone(),
         provisioning_source: session.provisioning_source.as_str().to_string(),
         dedicated_instance: session.provisioning_source.dedicated_instance(),
-        launched_on_eigencloud: session_launched_on_eigencloud(session),
-        verification_backend: config.map(|c| c.verification_backend.clone()),
-        verification_level: config.map(|_| verification_assurance_level(config)),
-        verification_fallback_enabled: config.map(|c| c.verification_fallback_enabled),
+        launched_on_eigencloud: session_launched_on_eigencloud(session).unwrap_or(false),
+        verification_backend: config
+            .map(|c| c.verification_backend.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        verification_level,
+        verification_fallback_enabled: config
+            .map(|c| c.verification_fallback_enabled)
+            .unwrap_or(false),
         verification_fallback_require_signed_receipts: config
-            .map(|c| c.verification_fallback_require_signed_receipts),
+            .map(|c| c.verification_fallback_require_signed_receipts)
+            .unwrap_or(false),
         instance_url: session.instance_url.clone(),
         verify_url: session.verify_url.clone(),
         eigen_app_id: session.eigen_app_id.clone(),
@@ -699,30 +2304,53 @@ fn render_session_response(session: &ProvisioningSession) -> FrontdoorSessionRes
         updated_at: session.updated_at.to_rfc3339(),
         expires_at: session.expires_at.to_rfc3339(),
         profile_name: config.map(|c| c.profile_name.clone()),
+        todo_open_required_count: todos.todo_open_required_count,
+        todo_open_recommended_count: todos.todo_open_recommended_count,
+        todo_status_summary: todos.todo_status_summary,
+        runtime_state: session.runtime_state.as_str().to_string(),
+        funding_preflight_status: session.funding_preflight.status.clone(),
+        funding_preflight_failure_category: session.funding_preflight.failure_category.clone(),
     }
 }
 
 fn render_session_summary(session: &ProvisioningSession) -> FrontdoorSessionSummaryResponse {
     let config = session.config.as_ref();
+    let todos = build_gateway_todos(session);
+    let verification_level = verification_assurance_level(config);
     FrontdoorSessionSummaryResponse {
-        session_ref: session.id.to_string().chars().take(8).collect(),
+        session_ref: public_session_ref(session),
         wallet_address: session.wallet_address.clone(),
         version: session.version,
         status: session.status.as_str().to_string(),
         detail: session.detail.clone(),
         provisioning_source: session.provisioning_source.as_str().to_string(),
         dedicated_instance: session.provisioning_source.dedicated_instance(),
-        launched_on_eigencloud: session_launched_on_eigencloud(session),
-        verification_backend: config.map(|c| c.verification_backend.clone()),
-        verification_level: config.map(|_| verification_assurance_level(config)),
-        verification_fallback_enabled: config.map(|c| c.verification_fallback_enabled),
+        launched_on_eigencloud: session_launched_on_eigencloud(session).unwrap_or(false),
+        verification_backend: config
+            .map(|c| c.verification_backend.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        verification_level,
+        verification_fallback_enabled: config
+            .map(|c| c.verification_fallback_enabled)
+            .unwrap_or(false),
         verification_fallback_require_signed_receipts: config
-            .map(|c| c.verification_fallback_require_signed_receipts),
+            .map(|c| c.verification_fallback_require_signed_receipts)
+            .unwrap_or(false),
         created_at: session.created_at.to_rfc3339(),
         updated_at: session.updated_at.to_rfc3339(),
         expires_at: session.expires_at.to_rfc3339(),
         profile_name: config.map(|c| c.profile_name.clone()),
+        todo_open_required_count: todos.todo_open_required_count,
+        todo_open_recommended_count: todos.todo_open_recommended_count,
+        todo_status_summary: todos.todo_status_summary,
+        runtime_state: session.runtime_state.as_str().to_string(),
+        funding_preflight_status: session.funding_preflight.status.clone(),
+        funding_preflight_failure_category: session.funding_preflight.failure_category.clone(),
     }
+}
+
+fn public_session_ref(session: &ProvisioningSession) -> String {
+    format!("v{}", session.version)
 }
 
 fn session_launched_on_eigencloud(session: &ProvisioningSession) -> Option<bool> {
@@ -1277,10 +2905,138 @@ fn message_matches(candidate: &str, expected: &str) -> bool {
 fn mandatory_frontdoor_steps() -> Vec<String> {
     vec![
         "connect_wallet_with_privy".to_string(),
+        "confirm_onboarding_plan".to_string(),
         "sign_gasless_authorization_transaction".to_string(),
         "configure_runtime_profile_and_risk".to_string(),
         "set_gateway_auth_key".to_string(),
         "accept_risk_and_terms".to_string(),
+    ]
+}
+
+fn frontdoor_policy_templates() -> Vec<FrontdoorPolicyTemplate> {
+    vec![
+        FrontdoorPolicyTemplate {
+            template_id: "general_safe_baseline".to_string(),
+            title: "General Safe Baseline".to_string(),
+            domain: "general".to_string(),
+            objective:
+                "Run non-trading automation with conservative permissions and verifiable receipts."
+                    .to_string(),
+            rationale:
+                "Preserves broad utility while enforcing signed fallback verification and minimal data sharing."
+                    .to_string(),
+            module_plan: vec![
+                "general".to_string(),
+                "developer".to_string(),
+                "research".to_string(),
+                "business_ops".to_string(),
+            ],
+            risk_profile: FrontdoorPolicyTemplateRiskProfile {
+                posture: "conservative".to_string(),
+                max_position_size_usd: 1_000,
+                max_leverage: 2,
+                max_slippage_bps: 50,
+            },
+            config: FrontdoorPolicyTemplateConfig {
+                paper_live_policy: "paper_only".to_string(),
+                custody_mode: "user_wallet".to_string(),
+                verification_backend: "eigencloud_primary".to_string(),
+                verification_fallback_require_signed_receipts: true,
+                information_sharing_scope: "signals_only".to_string(),
+            },
+        },
+        FrontdoorPolicyTemplate {
+            template_id: "developer_build_pipeline".to_string(),
+            title: "Developer Build Pipeline".to_string(),
+            domain: "developer".to_string(),
+            objective:
+                "Support coding workflows with stronger auditability and deterministic runtime controls."
+                    .to_string(),
+            rationale:
+                "Keeps execution in paper mode while allowing broader artifact traceability for debugging."
+                    .to_string(),
+            module_plan: vec![
+                "general".to_string(),
+                "developer".to_string(),
+                "research".to_string(),
+                "communications".to_string(),
+            ],
+            risk_profile: FrontdoorPolicyTemplateRiskProfile {
+                posture: "moderate".to_string(),
+                max_position_size_usd: 5_000,
+                max_leverage: 2,
+                max_slippage_bps: 80,
+            },
+            config: FrontdoorPolicyTemplateConfig {
+                paper_live_policy: "paper_first".to_string(),
+                custody_mode: "user_wallet".to_string(),
+                verification_backend: "eigencloud_primary".to_string(),
+                verification_fallback_require_signed_receipts: true,
+                information_sharing_scope: "full_audit".to_string(),
+            },
+        },
+        FrontdoorPolicyTemplate {
+            template_id: "hyperliquid_paper_operator".to_string(),
+            title: "Hyperliquid Paper Operator".to_string(),
+            domain: "hyperliquid".to_string(),
+            objective:
+                "Exercise Hyperliquid automation in paper mode with explicit risk caps and signed receipts."
+                    .to_string(),
+            rationale:
+                "Maintains trading-module optionality while blocking unsafe live defaults and preserving fallback verification."
+                    .to_string(),
+            module_plan: vec![
+                "general".to_string(),
+                "business_ops".to_string(),
+                "research".to_string(),
+                "communications".to_string(),
+                "hyperliquid_addon".to_string(),
+            ],
+            risk_profile: FrontdoorPolicyTemplateRiskProfile {
+                posture: "strict_trading".to_string(),
+                max_position_size_usd: 25_000,
+                max_leverage: 3,
+                max_slippage_bps: 40,
+            },
+            config: FrontdoorPolicyTemplateConfig {
+                paper_live_policy: "paper_only".to_string(),
+                custody_mode: "user_wallet".to_string(),
+                verification_backend: "eigencloud_primary".to_string(),
+                verification_fallback_require_signed_receipts: true,
+                information_sharing_scope: "signals_and_execution".to_string(),
+            },
+        },
+        FrontdoorPolicyTemplate {
+            template_id: "eigenda_receipt_guardrail".to_string(),
+            title: "EigenDA Receipt Guardrail".to_string(),
+            domain: "eigenda".to_string(),
+            objective:
+                "Prioritize verifiable receipt continuity for EigenDA-linked workflows under degraded backend conditions."
+                    .to_string(),
+            rationale:
+                "Favors fallback survivability with signed receipt requirements and lower sharing defaults."
+                    .to_string(),
+            module_plan: vec![
+                "general".to_string(),
+                "research".to_string(),
+                "business_ops".to_string(),
+                "communications".to_string(),
+                "eigenda_addon".to_string(),
+            ],
+            risk_profile: FrontdoorPolicyTemplateRiskProfile {
+                posture: "receipt_hardened".to_string(),
+                max_position_size_usd: 2_500,
+                max_leverage: 2,
+                max_slippage_bps: 60,
+            },
+            config: FrontdoorPolicyTemplateConfig {
+                paper_live_policy: "paper_first".to_string(),
+                custody_mode: "user_wallet".to_string(),
+                verification_backend: "fallback_only".to_string(),
+                verification_fallback_require_signed_receipts: true,
+                information_sharing_scope: "signals_only".to_string(),
+            },
+        },
     ]
 }
 
@@ -1524,6 +3280,12 @@ fn is_valid_gateway_auth_key(value: &str) -> bool {
         && trimmed.len() <= 128
         && trimmed.is_ascii()
         && !trimmed.chars().any(char::is_whitespace)
+}
+
+fn onboarding_gateway_auth_key_supplied(value: &str) -> bool {
+    let trimmed = value.trim();
+    is_valid_gateway_auth_key(trimmed)
+        || trimmed.eq_ignore_ascii_case(ONBOARDING_GATEWAY_AUTH_FROM_CONFIG_MARKER)
 }
 
 fn apply_intent_overrides(
@@ -2183,7 +3945,8 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::channels::web::types::{
-        FrontdoorChallengeRequest, FrontdoorUserConfig, FrontdoorVerifyRequest,
+        FrontdoorChallengeRequest, FrontdoorOnboardingChatRequest, FrontdoorRuntimeControlRequest,
+        FrontdoorUserConfig, FrontdoorVerifyRequest,
     };
 
     #[test]
@@ -2251,6 +4014,7 @@ mod tests {
                     default_instance_url: Some(
                         "https://session.example/gateway?token=demo".to_string(),
                     ),
+                    allow_default_instance_fallback: true,
                     verify_app_base_url: Some(
                         "https://verify-sepolia.eigencloud.xyz/app".to_string(),
                     ),
@@ -2325,15 +4089,9 @@ mod tests {
             assert_eq!(ready.profile_name.as_deref(), Some("demo_profile"));
             assert_eq!(ready.provisioning_source, "default_instance_url");
             assert!(!ready.dedicated_instance);
-            assert_eq!(ready.launched_on_eigencloud, Some(false));
-            assert_eq!(
-                ready.verification_backend.as_deref(),
-                Some("eigencloud_primary")
-            );
-            assert_eq!(
-                ready.verification_level.as_deref(),
-                Some("primary_plus_signed_fallback")
-            );
+            assert!(!ready.launched_on_eigencloud);
+            assert_eq!(ready.verification_backend, "eigencloud_primary");
+            assert_eq!(ready.verification_level, "primary_plus_signed_fallback");
         });
     }
 
@@ -2355,6 +4113,7 @@ mod tests {
                     default_instance_url: Some(
                         "https://session.example/gateway?token=demo".to_string(),
                     ),
+                    allow_default_instance_fallback: true,
                     verify_app_base_url: None,
                     session_ttl_secs: 900,
                     poll_interval_ms: 100,
@@ -2437,6 +4196,7 @@ mod tests {
                 privy_client_id: None,
                 provision_command: None,
                 default_instance_url: None,
+                allow_default_instance_fallback: false,
                 verify_app_base_url: None,
                 session_ttl_secs: 900,
                 poll_interval_ms: 1000,
@@ -2462,6 +4222,276 @@ mod tests {
     }
 
     #[test]
+    fn suggest_config_enforces_connected_wallet_for_user_and_dual_custody() {
+        let tmp = tempdir().expect("tempdir");
+        let service = FrontdoorService::new_for_tests(
+            FrontdoorConfig {
+                require_privy: false,
+                privy_app_id: None,
+                privy_client_id: None,
+                provision_command: None,
+                default_instance_url: None,
+                allow_default_instance_fallback: false,
+                verify_app_base_url: None,
+                session_ttl_secs: 900,
+                poll_interval_ms: 1000,
+            },
+            tmp.path().join("wallet_sessions.json"),
+        );
+
+        let connected_wallet = "0x9431Cf5DA0CE60664661341db650763B08286B18";
+        let mismatched_wallet = "0x8ba1f109551bD432803012645Ac136ddd64DBA72";
+
+        let base_user_wallet = sample_user_config(mismatched_wallet);
+        let user_wallet_err = service
+            .suggest_config(crate::channels::web::types::FrontdoorSuggestConfigRequest {
+                wallet_address: connected_wallet.to_string(),
+                intent: "use my own wallet".to_string(),
+                domain: Some("hyperliquid".to_string()),
+                gateway_auth_key: None,
+                base_config: Some(base_user_wallet),
+            })
+            .expect_err("mismatched user_wallet should fail");
+        assert_eq!(
+            user_wallet_err,
+            "user_wallet_address must match the connected wallet for user_wallet/dual_mode"
+        );
+
+        let mut base_dual_mode = sample_user_config(mismatched_wallet);
+        base_dual_mode.custody_mode = "dual_mode".to_string();
+        base_dual_mode.operator_wallet_address =
+            Some("0x1111111111111111111111111111111111111111".to_string());
+
+        let dual_mode_err = service
+            .suggest_config(crate::channels::web::types::FrontdoorSuggestConfigRequest {
+                wallet_address: connected_wallet.to_string(),
+                intent: "dual mode".to_string(),
+                domain: Some("hyperliquid".to_string()),
+                gateway_auth_key: None,
+                base_config: Some(base_dual_mode),
+            })
+            .expect_err("mismatched dual_mode user wallet should fail");
+        assert_eq!(
+            dual_mode_err,
+            "user_wallet_address must match the connected wallet for user_wallet/dual_mode"
+        );
+    }
+
+    #[test]
+    fn operator_and_dual_custody_require_operator_wallet_in_validation() {
+        let connected_wallet = "0x9431Cf5DA0CE60664661341db650763B08286B18";
+
+        let mut operator_wallet_mode = sample_user_config(connected_wallet);
+        operator_wallet_mode.custody_mode = "operator_wallet".to_string();
+        operator_wallet_mode.operator_wallet_address = None;
+        let operator_wallet_err = validate_user_config(&operator_wallet_mode)
+            .expect_err("operator_wallet must require operator wallet");
+        assert_eq!(
+            operator_wallet_err,
+            "operator_wallet_address is required for custody_mode operator_wallet/dual_mode"
+        );
+
+        let mut dual_mode = sample_user_config(connected_wallet);
+        dual_mode.custody_mode = "dual_mode".to_string();
+        dual_mode.operator_wallet_address = None;
+        let dual_mode_err =
+            validate_user_config(&dual_mode).expect_err("dual_mode must require operator wallet");
+        assert_eq!(
+            dual_mode_err,
+            "operator_wallet_address is required for custody_mode operator_wallet/dual_mode"
+        );
+    }
+
+    #[test]
+    fn suggest_config_normalizes_missing_operator_wallet_in_operator_or_dual_modes() {
+        let tmp = tempdir().expect("tempdir");
+        let service = FrontdoorService::new_for_tests(
+            FrontdoorConfig {
+                require_privy: false,
+                privy_app_id: None,
+                privy_client_id: None,
+                provision_command: None,
+                default_instance_url: None,
+                allow_default_instance_fallback: false,
+                verify_app_base_url: None,
+                session_ttl_secs: 900,
+                poll_interval_ms: 1000,
+            },
+            tmp.path().join("wallet_sessions.json"),
+        );
+
+        let connected_wallet = "0x9431Cf5DA0CE60664661341db650763B08286B18";
+        for intent in ["operator wallet", "dual mode"] {
+            let mut base = sample_user_config(connected_wallet);
+            base.operator_wallet_address = None;
+
+            let suggested = service
+                .suggest_config(crate::channels::web::types::FrontdoorSuggestConfigRequest {
+                    wallet_address: connected_wallet.to_string(),
+                    intent: intent.to_string(),
+                    domain: Some("hyperliquid".to_string()),
+                    gateway_auth_key: None,
+                    base_config: Some(base),
+                })
+                .expect("suggest config should normalize missing operator wallet");
+
+            assert_eq!(suggested.config.custody_mode, "user_wallet");
+            assert!(
+                suggested
+                    .assumptions
+                    .iter()
+                    .any(|assumption| assumption
+                        == "Operator wallet missing; normalized custody_mode to user_wallet for safe launch.")
+            );
+            let normalized_wallet = normalize_wallet_address(
+                suggested
+                    .config
+                    .user_wallet_address
+                    .as_deref()
+                    .expect("suggested config must include user wallet"),
+            )
+            .expect("suggested wallet must be valid");
+            assert_eq!(
+                normalized_wallet,
+                "0x9431cf5da0ce60664661341db650763b08286b18"
+            );
+        }
+    }
+
+    #[test]
+    fn suggest_config_normalizes_hyperliquid_fields_for_non_hyperliquid_domains() {
+        let tmp = tempdir().expect("tempdir");
+        let service = FrontdoorService::new_for_tests(
+            FrontdoorConfig {
+                require_privy: false,
+                privy_app_id: None,
+                privy_client_id: None,
+                provision_command: None,
+                default_instance_url: None,
+                allow_default_instance_fallback: false,
+                verify_app_base_url: None,
+                session_ttl_secs: 900,
+                poll_interval_ms: 1000,
+            },
+            tmp.path().join("wallet_sessions.json"),
+        );
+
+        let connected_wallet = "0x9431Cf5DA0CE60664661341db650763B08286B18";
+        let mut base = sample_user_config(connected_wallet);
+        base.hyperliquid_network = "mainnet".to_string();
+        base.paper_live_policy = "live_allowed".to_string();
+        base.symbol_allowlist = vec!["BTC".to_string()];
+        base.symbol_denylist = vec!["ETH".to_string()];
+
+        let suggested = service
+            .suggest_config(crate::channels::web::types::FrontdoorSuggestConfigRequest {
+                wallet_address: connected_wallet.to_string(),
+                intent: "mainnet live trading with btc-only".to_string(),
+                domain: Some("general".to_string()),
+                gateway_auth_key: None,
+                base_config: Some(base),
+            })
+            .expect("suggest config");
+
+        assert!(suggested.validated);
+        assert_eq!(suggested.config.profile_domain, "general");
+        assert_eq!(suggested.config.hyperliquid_network, "testnet");
+        assert_eq!(suggested.config.paper_live_policy, "paper_only");
+        assert!(suggested.config.symbol_allowlist.is_empty());
+        assert!(suggested.config.symbol_denylist.is_empty());
+    }
+
+    #[test]
+    fn suggest_config_keeps_addon_domains_explicit() {
+        let tmp = tempdir().expect("tempdir");
+        let service = FrontdoorService::new_for_tests(
+            FrontdoorConfig {
+                require_privy: false,
+                privy_app_id: None,
+                privy_client_id: None,
+                provision_command: None,
+                default_instance_url: None,
+                allow_default_instance_fallback: false,
+                verify_app_base_url: None,
+                session_ttl_secs: 900,
+                poll_interval_ms: 1000,
+            },
+            tmp.path().join("wallet_sessions.json"),
+        );
+
+        let connected_wallet = "0x9431Cf5DA0CE60664661341db650763B08286B18";
+        let general_suggested = service
+            .suggest_config(crate::channels::web::types::FrontdoorSuggestConfigRequest {
+                wallet_address: connected_wallet.to_string(),
+                intent: "hyperliquid eigenda mainnet workflow".to_string(),
+                domain: None,
+                gateway_auth_key: None,
+                base_config: None,
+            })
+            .expect("general suggest config");
+        assert_eq!(general_suggested.config.profile_domain, "general");
+
+        let eigenda_suggested = service
+            .suggest_config(crate::channels::web::types::FrontdoorSuggestConfigRequest {
+                wallet_address: connected_wallet.to_string(),
+                intent: "receipt continuity".to_string(),
+                domain: Some("eigenda".to_string()),
+                gateway_auth_key: None,
+                base_config: None,
+            })
+            .expect("eigenda suggest config");
+        assert_eq!(eigenda_suggested.config.profile_domain, "eigenda");
+    }
+
+    #[test]
+    fn domain_profiles_keep_addon_modules_explicit() {
+        let profiles = frontdoor_domain_profiles();
+        let general = profiles
+            .iter()
+            .find(|profile| profile.domain == "general")
+            .expect("general profile");
+        let hyperliquid = profiles
+            .iter()
+            .find(|profile| profile.domain == "hyperliquid")
+            .expect("hyperliquid profile");
+        let eigenda = profiles
+            .iter()
+            .find(|profile| profile.domain == "eigenda")
+            .expect("eigenda profile");
+
+        assert!(
+            !general
+                .default_modules
+                .iter()
+                .any(|module| module == "hyperliquid_addon" || module == "eigenda_addon")
+        );
+        assert!(
+            hyperliquid
+                .default_modules
+                .iter()
+                .any(|module| module == "hyperliquid_addon")
+        );
+        assert!(
+            !hyperliquid
+                .default_modules
+                .iter()
+                .any(|module| module == "eigenda_addon")
+        );
+        assert!(
+            eigenda
+                .default_modules
+                .iter()
+                .any(|module| module == "eigenda_addon")
+        );
+        assert!(
+            !eigenda
+                .default_modules
+                .iter()
+                .any(|module| module == "hyperliquid_addon")
+        );
+    }
+
+    #[test]
     fn config_contract_reports_supported_versions() {
         let tmp = tempdir().expect("tempdir");
         let service = FrontdoorService::new_for_tests(
@@ -2471,6 +4501,7 @@ mod tests {
                 privy_client_id: None,
                 provision_command: None,
                 default_instance_url: None,
+                allow_default_instance_fallback: false,
                 verify_app_base_url: None,
                 session_ttl_secs: 900,
                 poll_interval_ms: 1000,
@@ -2495,6 +4526,40 @@ mod tests {
     }
 
     #[test]
+    fn policy_template_library_exposes_common_objective_presets() {
+        let tmp = tempdir().expect("tempdir");
+        let service = FrontdoorService::new_for_tests(
+            FrontdoorConfig {
+                require_privy: false,
+                privy_app_id: None,
+                privy_client_id: None,
+                provision_command: None,
+                default_instance_url: None,
+                allow_default_instance_fallback: false,
+                verify_app_base_url: None,
+                session_ttl_secs: 900,
+                poll_interval_ms: 1000,
+            },
+            tmp.path().join("wallet_sessions.json"),
+        );
+
+        let library = service.policy_template_library();
+        assert!(!library.templates.is_empty());
+        assert!(
+            library
+                .templates
+                .iter()
+                .any(|template| template.template_id == "general_safe_baseline")
+        );
+        assert!(
+            library
+                .templates
+                .iter()
+                .any(|template| template.template_id == "hyperliquid_paper_operator")
+        );
+    }
+
+    #[test]
     fn list_sessions_filters_by_wallet() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -2509,6 +4574,7 @@ mod tests {
                     privy_client_id: None,
                     provision_command: None,
                     default_instance_url: None,
+                    allow_default_instance_fallback: false,
                     verify_app_base_url: None,
                     session_ttl_secs: 900,
                     poll_interval_ms: 1000,
@@ -2548,6 +4614,334 @@ mod tests {
             );
             assert_eq!(sessions[0].provisioning_source, "unknown");
         });
+    }
+
+    #[test]
+    fn experience_manifest_includes_state_inputs() {
+        let tmp = tempdir().expect("tempdir");
+        let service = FrontdoorService::new_for_tests(
+            FrontdoorConfig {
+                require_privy: false,
+                privy_app_id: None,
+                privy_client_id: None,
+                provision_command: None,
+                default_instance_url: None,
+                allow_default_instance_fallback: false,
+                verify_app_base_url: None,
+                session_ttl_secs: 900,
+                poll_interval_ms: 1000,
+            },
+            tmp.path().join("wallet_sessions.json"),
+        );
+        let manifest = service.experience_manifest();
+        assert_eq!(manifest.manifest_version, 1);
+        assert!(manifest.steps.len() >= 4);
+        assert!(
+            manifest
+                .steps
+                .iter()
+                .all(|step| !step.state_inputs.is_empty())
+        );
+        assert!(
+            manifest
+                .steps
+                .iter()
+                .any(|step| step.step_id == "verification"
+                    && step.state_inputs.iter().any(|field| field == "signature"))
+        );
+    }
+
+    #[test]
+    fn onboarding_timeline_runtime_todos_and_preflight_are_deterministic() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let tmp = tempdir().expect("tempdir");
+            let service = FrontdoorService::new_for_tests(
+                FrontdoorConfig {
+                    require_privy: false,
+                    privy_app_id: None,
+                    privy_client_id: None,
+                    provision_command: None,
+                    default_instance_url: Some("https://session.example/gateway".to_string()),
+                    allow_default_instance_fallback: true,
+                    verify_app_base_url: Some(
+                        "https://verify-sepolia.eigencloud.xyz/app".to_string(),
+                    ),
+                    session_ttl_secs: 900,
+                    poll_interval_ms: 100,
+                },
+                tmp.path().join("wallet_sessions.json"),
+            );
+
+            let private_key = decode_hex_prefixed(
+                "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            )
+            .expect("private key");
+            let signing_key = SigningKey::from_slice(&private_key).expect("signing key");
+            let wallet =
+                ethereum_address_from_verifying_key(signing_key.verifying_key()).expect("wallet");
+
+            let challenge = service
+                .create_challenge(FrontdoorChallengeRequest {
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    chain_id: Some(1),
+                })
+                .await
+                .expect("challenge");
+            let session_uuid = Uuid::parse_str(&challenge.session_id).expect("session uuid");
+
+            let onboarding = service
+                .onboarding_state(session_uuid)
+                .await
+                .expect("onboarding");
+            assert_eq!(onboarding.current_step, "capture_objective");
+            assert_eq!(onboarding.transcript.len(), 1);
+
+            let empty_chat = service
+                .onboarding_chat(FrontdoorOnboardingChatRequest {
+                    session_id: challenge.session_id.clone(),
+                    message: "   ".to_string(),
+                })
+                .await;
+            assert!(empty_chat.is_err());
+
+            let chat = service
+                .onboarding_chat(FrontdoorOnboardingChatRequest {
+                    session_id: challenge.session_id.clone(),
+                    message: "Launch conservative strategy profile".to_string(),
+                })
+                .await
+                .expect("chat");
+            assert_eq!(chat.state.current_step, "propose_plan");
+            assert!(!chat.state.completed);
+
+            let confirm_plan = service
+                .onboarding_chat(FrontdoorOnboardingChatRequest {
+                    session_id: challenge.session_id.clone(),
+                    message: "confirm plan".to_string(),
+                })
+                .await
+                .expect("confirm plan");
+            assert_eq!(confirm_plan.state.current_step, "collect_required_variables");
+            assert!(!confirm_plan.state.missing_fields.is_empty());
+
+            let fill_required = service
+                .onboarding_chat(FrontdoorOnboardingChatRequest {
+                    session_id: challenge.session_id.clone(),
+                    message: "profile_name=demo_profile, gateway_auth_key=__from_config__, accept_terms=true".to_string(),
+                })
+                .await
+                .expect("fill required");
+            assert_eq!(fill_required.state.current_step, "confirm_and_sign");
+            assert!(fill_required.state.missing_fields.is_empty());
+
+            let confirm_sign = service
+                .onboarding_chat(FrontdoorOnboardingChatRequest {
+                    session_id: challenge.session_id.clone(),
+                    message: "confirm sign".to_string(),
+                })
+                .await
+                .expect("confirm sign");
+            assert_eq!(confirm_sign.state.current_step, "ready_to_sign");
+            assert!(confirm_sign.state.completed);
+
+            let timeline = service
+                .session_timeline(session_uuid)
+                .await
+                .expect("timeline");
+            assert!(timeline.events.len() >= 3);
+            let mut prev = 0u64;
+            for event in &timeline.events {
+                assert!(event.seq_id > prev);
+                prev = event.seq_id;
+            }
+
+            let prehash = eip191_personal_sign_hash(&challenge.message);
+            let (sig, recid) = signing_key
+                .sign_prehash_recoverable(&prehash)
+                .expect("sign challenge");
+            let mut sig_bytes = sig.to_bytes().to_vec();
+            sig_bytes.push(recid.to_byte() + 27);
+            let signature = format!("0x{}", encode_hex_lower(&sig_bytes));
+
+            service
+                .clone()
+                .verify_and_start(FrontdoorVerifyRequest {
+                    session_id: challenge.session_id.clone(),
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    privy_identity_token: None,
+                    privy_access_token: None,
+                    message: challenge.message.clone(),
+                    signature,
+                    config: sample_user_config(&wallet),
+                })
+                .await
+                .expect("verify and start");
+
+            let verification = service
+                .verification_explanation(session_uuid)
+                .await
+                .expect("verification explanation");
+            assert_eq!(verification.backend, "eigencloud_primary");
+            assert_eq!(verification.level, "primary_plus_signed_fallback");
+
+            let preflight = service
+                .funding_preflight(session_uuid)
+                .await
+                .expect("funding preflight");
+            assert_eq!(preflight.status, "passed");
+            assert!(
+                preflight
+                    .checks
+                    .iter()
+                    .all(|check| !check.check_id.is_empty() && !check.status.is_empty())
+            );
+
+            let invalid_runtime = service
+                .runtime_control(
+                    session_uuid,
+                    FrontdoorRuntimeControlRequest {
+                        action: "invalid".to_string(),
+                        actor: None,
+                    },
+                )
+                .await;
+            assert!(invalid_runtime.is_err());
+
+            let runtime = service
+                .runtime_control(
+                    session_uuid,
+                    FrontdoorRuntimeControlRequest {
+                        action: "pause".to_string(),
+                        actor: Some("operator".to_string()),
+                    },
+                )
+                .await
+                .expect("runtime control");
+            assert!(runtime.status == "applied" || runtime.status == "noop");
+            assert_eq!(runtime.runtime_state, "paused");
+
+            let todos = service
+                .gateway_todos_for_session(session_uuid)
+                .await
+                .expect("gateway todos");
+            assert!(!todos.todos.is_empty());
+            assert!(
+                todos
+                    .todos
+                    .iter()
+                    .all(|todo| !todo.todo_id.is_empty() && !todo.owner.is_empty())
+            );
+
+            let session_payload = service.get_session(session_uuid).await.expect("session");
+            let json = serde_json::to_value(session_payload).expect("session json");
+            let obj = json.as_object().expect("object");
+            assert!(obj.contains_key("launched_on_eigencloud"));
+            assert!(obj.contains_key("verification_backend"));
+            assert!(obj.contains_key("verification_level"));
+            assert!(obj.contains_key("verification_fallback_enabled"));
+            assert!(obj.contains_key("verification_fallback_require_signed_receipts"));
+        });
+    }
+
+    #[test]
+    fn operator_vs_public_monitor_payloads_are_separated() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let tmp = tempdir().expect("tempdir");
+            let service = FrontdoorService::new_for_tests(
+                FrontdoorConfig {
+                    require_privy: false,
+                    privy_app_id: None,
+                    privy_client_id: None,
+                    provision_command: None,
+                    default_instance_url: None,
+                    allow_default_instance_fallback: false,
+                    verify_app_base_url: None,
+                    session_ttl_secs: 900,
+                    poll_interval_ms: 1000,
+                },
+                tmp.path().join("wallet_sessions.json"),
+            );
+
+            let wallet = "0x9431Cf5DA0CE60664661341db650763B08286B18".to_string();
+            let challenge = service
+                .create_challenge(FrontdoorChallengeRequest {
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    chain_id: Some(1),
+                })
+                .await
+                .expect("challenge");
+
+            let (public_total, public_sessions) = service
+                .list_sessions(Some(&wallet), 10)
+                .await
+                .expect("public sessions");
+            assert_eq!(public_total, 1);
+            assert_eq!(public_sessions.len(), 1);
+            assert_eq!(public_sessions[0].session_ref, "v1");
+            assert_eq!(public_sessions[0].verification_backend, "unknown");
+            assert_eq!(public_sessions[0].verification_level, "unknown");
+            assert!(!public_sessions[0].verification_fallback_enabled);
+            assert!(!public_sessions[0].verification_fallback_require_signed_receipts);
+            assert!(!public_sessions[0].launched_on_eigencloud);
+
+            let public_json = serde_json::to_value(&public_sessions[0]).expect("public json");
+            let public_obj = public_json.as_object().expect("public object");
+            assert!(!public_obj.contains_key("session_id"));
+            assert!(!public_obj.contains_key("instance_url"));
+            assert!(!public_obj.contains_key("verify_url"));
+            assert!(!public_obj.contains_key("eigen_app_id"));
+            assert!(!public_obj.contains_key("error"));
+
+            let (operator_total, operator_sessions) = service
+                .list_sessions_full(Some(&wallet), 10)
+                .await
+                .expect("operator sessions");
+            assert_eq!(operator_total, 1);
+            assert_eq!(operator_sessions.len(), 1);
+            assert_eq!(operator_sessions[0].session_id, challenge.session_id);
+            assert_eq!(operator_sessions[0].verification_backend, "unknown");
+            assert_eq!(operator_sessions[0].verification_level, "unknown");
+
+            let operator_json = serde_json::to_value(&operator_sessions[0]).expect("operator json");
+            let operator_obj = operator_json.as_object().expect("operator object");
+            assert!(operator_obj.contains_key("session_id"));
+            assert!(operator_obj.contains_key("launched_on_eigencloud"));
+            assert!(operator_obj.contains_key("verification_backend"));
+            assert!(operator_obj.contains_key("verification_level"));
+            assert!(operator_obj.contains_key("verification_fallback_enabled"));
+            assert!(operator_obj.contains_key("verification_fallback_require_signed_receipts"));
+        });
+    }
+
+    #[test]
+    fn onboarding_gateway_auth_marker_counts_as_resolved_requirement() {
+        let mut captured = HashMap::new();
+        captured.insert("profile_name".to_string(), "demo_profile".to_string());
+        captured.insert(
+            "gateway_auth_key".to_string(),
+            "__from_config__".to_string(),
+        );
+        captured.insert("accept_terms".to_string(), "true".to_string());
+
+        let payload = build_onboarding_step3_payload(&captured);
+        assert_eq!(payload.unresolved_required_count, 0);
+        let gateway = payload
+            .required_variables
+            .iter()
+            .find(|item| item.field == "gateway_auth_key")
+            .expect("gateway_auth_key required variable");
+        assert_eq!(gateway.status, "resolved");
     }
 
     fn sample_user_config(wallet: &str) -> FrontdoorUserConfig {

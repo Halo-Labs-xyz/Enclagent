@@ -95,6 +95,7 @@ impl GatewayChannel {
                     privy_client_id: fd.privy_client_id,
                     provision_command: fd.provision_command,
                     default_instance_url: fd.default_instance_url,
+                    allow_default_instance_fallback: fd.allow_default_instance_fallback,
                     verify_app_base_url: fd.verify_app_base_url,
                     session_ttl_secs: fd.session_ttl_secs,
                     poll_interval_ms: fd.poll_interval_ms,

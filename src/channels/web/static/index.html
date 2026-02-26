@@ -37,16 +37,25 @@
     <!-- Tab Bar -->
     <div class="tab-bar">
       <button class="active" data-tab="chat">Chat</button>
+      <button data-tab="skills">Skills</button>
       <button data-tab="ops">Hyperliquid Ops</button>
       <button data-tab="memory">Memory</button>
       <button data-tab="jobs">Jobs</button>
       <button data-tab="logs">Logs</button>
-      <button data-tab="routines">Routines</button>
+      <button data-tab="routines">Automations</button>
       <button data-tab="extensions">Extensions</button>
       <div class="spacer"></div>
-      <div class="status" id="gateway-status-trigger">
+      <div class="quick-toggles" id="quick-toggles">
+        <button class="surface-toggle" data-surface-toggle="logs" aria-pressed="false">Logs</button>
+        <button class="surface-toggle" data-surface-toggle="history" aria-pressed="false">Action History</button>
+        <button class="surface-toggle" data-surface-toggle="usage" aria-pressed="false">Compute/Usage</button>
+      </div>
+      <div class="status runtime-status" id="gateway-status-trigger">
         <div class="dot" id="sse-dot"></div>
-        <span id="sse-status">Connected</span>
+        <div class="runtime-meta">
+          <span id="runtime-instance">runtime@local</span>
+          <span id="sse-status">Connected</span>
+        </div>
         <div class="gateway-popover" id="gateway-popover"></div>
       </div>
     </div>
@@ -69,11 +78,42 @@
         <div class="thread-list" id="thread-list"></div>
       </div>
       <div class="chat-container">
+        <div class="chat-primary-rail">
+          <span class="chat-primary-label">Thread-Centric Chat</span>
+          <button class="storage-link-btn" onclick="openPrivateStorageTree()">Open Private Storage Tree</button>
+          <span class="storage-link-meta" id="private-storage-meta">Loading private storage...</span>
+        </div>
         <div class="chat-messages" id="chat-messages"></div>
         <div class="chat-status" id="chat-status"></div>
         <div class="chat-input">
           <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
           <button id="send-btn" onclick="sendMessage()">Send</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skills Tab -->
+    <div class="tab-panel" id="tab-skills">
+      <div class="skills-container">
+        <div class="skills-toolbar">
+          <input type="text" id="skills-search-query" placeholder="Search catalog and installed skills...">
+          <button onclick="searchSkills()">Search</button>
+          <button class="btn-secondary" onclick="loadSkills()">Refresh</button>
+        </div>
+        <div class="skills-summary" id="skills-summary"></div>
+        <div class="skills-columns">
+          <div class="skills-column">
+            <h3>Installed Skills</h3>
+            <div class="skills-list" id="skills-installed-list">
+              <div class="empty-state">Loading installed skills...</div>
+            </div>
+          </div>
+          <div class="skills-column">
+            <h3>Catalog Results</h3>
+            <div class="skills-list" id="skills-catalog-list">
+              <div class="empty-state">Run search to load catalog skills.</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -154,7 +194,7 @@
       </div>
     </div>
 
-    <!-- Routines Tab -->
+    <!-- Automations Tab (routines API) -->
     <div class="tab-panel" id="tab-routines">
       <div class="routines-container">
         <div class="routines-summary" id="routines-summary"></div>
@@ -215,6 +255,40 @@
           </table>
           <div class="empty-state" id="tools-empty" style="display:none">No tools registered</div>
         </div>
+      </div>
+    </div>
+
+    <!-- Upper-right quick surfaces -->
+    <div class="quick-surfaces" id="quick-surfaces">
+      <section class="quick-surface" id="quick-surface-logs">
+        <div class="quick-surface-header">Logs</div>
+        <div class="quick-surface-body" id="quick-logs-output">
+          <div class="empty-state">No logs yet</div>
+        </div>
+      </section>
+      <section class="quick-surface" id="quick-surface-history">
+        <div class="quick-surface-header">Action History</div>
+        <div class="quick-surface-body" id="quick-history-output">
+          <div class="empty-state">Loading action history...</div>
+        </div>
+      </section>
+      <section class="quick-surface" id="quick-surface-usage">
+        <div class="quick-surface-header">Compute/Usage</div>
+        <div class="quick-surface-body" id="quick-usage-output">
+          <div class="empty-state">Loading usage surfaces...</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Bottom-left settings entry -->
+    <button class="settings-entry" id="settings-entry" onclick="toggleSettingsPanel()">Settings</button>
+    <div class="settings-panel" id="settings-panel">
+      <div class="settings-panel-header">
+        <span>Runtime Settings</span>
+        <button onclick="toggleSettingsPanel()">Close</button>
+      </div>
+      <div class="settings-panel-body" id="settings-panel-body">
+        <div class="empty-state">Loading settings...</div>
       </div>
     </div>
   </div>
