@@ -6,11 +6,12 @@ This document defines the user-facing launch flow for the shared Enclagent gatew
 
 Expose a production entrypoint where users:
 
-1. Connect wallet (Privy-mode EVM wallet flow, no SIWE token handshake).
-2. Sign a mandatory gasless authorization challenge.
-3. Complete required risk/runtime configuration.
-4. Trigger per-user enclave provisioning.
-5. Get redirected to their personal instance URL when ready.
+1. Connect an EVM wallet in frontdoor UI and bind the wallet to session identity.
+2. Sign a mandatory gasless authorization challenge (no SIWE token handshake).
+3. Submit validated runtime config (manual form and/or suggest-config API).
+4. Pass funding preflight checks before provisioning can start.
+5. Trigger provisioning via command backend or static fallback URL.
+6. Poll session state and redirect when the session reaches `ready`.
 
 ## Enable Frontdoor
 
@@ -24,6 +25,7 @@ GATEWAY_FRONTDOOR_PRIVY_CLIENT_ID=<privy_client_id>   # optional
 GATEWAY_FRONTDOOR_SESSION_TTL_SECS=900
 GATEWAY_FRONTDOOR_POLL_INTERVAL_MS=1500
 GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL=https://verify-sepolia.eigencloud.xyz/app
+GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK=false
 ```
 
 Privy environment resolution order:
@@ -46,6 +48,51 @@ Configure one provisioning path:
 
 1. Command-based provisioning (recommended for per-user enclave creation)
 2. Static fallback URL (shared instance redirect)
+
+## Identity Entry Requirements
+
+- Current frontdoor UI provides a single Privy connect button with provider chooser semantics (`wallet`, `email`, social OAuth providers) and enforces wallet binding before launch.
+- Wallet connect remains non-SIWE for frontdoor challenge flow: users connect injected EVM wallet, then complete the gateway gasless authorization challenge signature.
+- Email/social entry paths authenticate through Privy (email OTP or OAuth) and must converge on wallet binding before provisioning is allowed.
+- When `privy_app_id` is present, connect flow initializes Privy client before provider execution so identity paths are deterministic.
+- When `GATEWAY_FRONTDOOR_REQUIRE_PRIVY=true`, bootstrap requires resolved `privy_app_id`; launch is blocked if missing.
+- `privy_user_id` is carried as wallet-linked identity metadata and validated on verify when present.
+- Deterministic launch path in this branch:
+1. wallet connect
+2. challenge issuance
+3. onboarding objective + plan confirmation (`confirm plan`)
+4. onboarding signature confirmation (`confirm sign`)
+5. challenge signature verification
+6. funding preflight
+7. provisioning
+
+## Conversational Onboarding Requirements
+
+- Backend onboarding APIs are implemented:
+1. `GET /api/frontdoor/onboarding/state?session_id=<uuid>`
+2. `POST /api/frontdoor/onboarding/chat`
+- Implemented onboarding state machine:
+1. `capture_objective`
+2. `propose_plan`
+3. `collect_required_variables`
+4. `confirm_and_sign`
+5. `ready_to_sign`
+- Transcript and step state are persisted per active session and exposed in onboarding state/timeline responses.
+- Frontend typed session panel now wires onboarding state + chat and renders transcript, timeline, verification explanation, runtime controls, TODO posture, and funding preflight evidence.
+- Frontend launch flow now drives onboarding step-4 deterministically before `POST /api/frontdoor/verify`:
+1. captures objective
+2. fills required variables from launch config (`profile_name`, `accept_terms`, and non-secret `gateway_auth_key=__from_config__` marker)
+3. executes `confirm plan`
+4. executes `confirm sign`
+- Deterministic module state cards expose dropdown details and pop-out inspection to keep backend contracts and artifact bindings inspectable without leaving launch flow.
+- Blocked launch states expose a deterministic next action hint; failed API actions surface typed failure code + operator hint.
+
+## Funding + Dedicated Provisioning Requirements
+
+- Before provision command execution, perform a funding preflight for wallet-linked dedicated EigenCloud account readiness.
+- Preflight must classify failure reason as `gas`, `fee`, `auth`, or `policy`.
+- Provision action is blocked until preflight is successful.
+- Preflight results must be visible in session detail and generated gateway TODO state.
 
 ### Command Provisioning
 
@@ -122,19 +169,36 @@ If dynamic provisioning is not enabled, set:
 
 ```bash
 GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL=https://verify-sepolia.eigencloud.xyz/app/<app-id>
+GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK=true
 ```
+
+Default fallback behavior is fail-closed. `GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK=true` is required to permit static fallback URL usage.
 
 ## API Contract
 
 Public (no gateway token required):
 
 - `GET /api/frontdoor/config-contract`
+- `GET /api/frontdoor/policy-templates`
+- `GET /api/frontdoor/experience/manifest`
 - `GET /api/frontdoor/bootstrap`
+- `GET /api/frontdoor/onboarding/state?session_id=<uuid>`
+- `POST /api/frontdoor/onboarding/chat`
 - `POST /api/frontdoor/challenge`
 - `POST /api/frontdoor/suggest-config`
 - `POST /api/frontdoor/verify`
 - `GET /api/frontdoor/session/{session_id}`
-- `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>` (wallet filter required)
+- `GET /api/frontdoor/session/{session_id}/timeline`
+- `GET /api/frontdoor/session/{session_id}/verification-explanation`
+- `POST /api/frontdoor/session/{session_id}/runtime-control`
+- `GET /api/frontdoor/session/{session_id}/gateway-todos`
+- `GET /api/frontdoor/session/{session_id}/funding-preflight`
+- `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>` (wallet filter required, `limit` clamped to `1..100`)
+
+Protected (gateway token required):
+
+- `GET /api/frontdoor/operator/sessions?wallet_address=<0x...>&limit=<n>` (full session payloads)
+- `GET /api/gateway/todos?wallet_address=<0x...>&session_id=<uuid>&limit=<n>` (aggregated TODO feeds)
 
 Session status/monitor responses include provisioning audit fields:
 
@@ -145,12 +209,57 @@ Session status/monitor responses include provisioning audit fields:
 - `verification_level` (`primary_only`, `primary_plus_signed_fallback`, `signed_fallback_only`, etc.)
 - `verification_fallback_enabled`
 - `verification_fallback_require_signed_receipts`
+- `runtime_state` (`running`, `paused`, `terminated`)
+- `funding_preflight_status` (`pending`, `passed`, `failed`)
+- `funding_preflight_failure_category` (`gas`, `fee`, `auth`, `policy`)
+
+Generated gateway state should also surface TODO readiness fields:
+
+- `todo_open_required_count`
+- `todo_open_recommended_count`
+- `todo_status_summary`
 
 `/api/frontdoor/sessions` returns redacted summary rows (no session UUID, instance URL, or verify URL) for safer public monitoring.
+
+`POST /api/frontdoor/session/{session_id}/runtime-control` accepts:
+
+- `pause`
+- `resume`
+- `terminate`
+- `rotate_auth_key`
 
 The root UI (`/`) auto-switches to the frontdoor page when frontdoor mode is enabled.
 
 Legacy gateway UI remains reachable at `/gateway` (token auth still required).
+
+## Railway Signed E2E Gate
+
+Use the canonical signed-flow verifier for staging + production:
+
+```bash
+bash ./scripts/verify-frontdoor-railway-signed-e2e.sh <env-file>
+```
+
+Current deployed fallback topology contract:
+
+- `FRONTDOOR_E2E_REQUIRED_PROVISIONING_SOURCE=default_instance_url`
+- `FRONTDOOR_E2E_REQUIRE_DEDICATED_INSTANCE=false`
+- `FRONTDOOR_E2E_REQUIRE_LAUNCHED_ON_EIGENCLOUD=false`
+
+Incident rollback runbook is maintained at:
+
+- `docs/FRONTDOOR_ROLLBACK_PLAYBOOK.md`
+
+Post-provision target UX requirements:
+
+- Redirect destination should open a unified enclave workspace (thread-first interaction).
+- Workspace should expose integrated surfaces for:
+1. threads/chat
+2. private storage tree
+3. skills
+4. automations
+5. logs/action history/compute usage
+6. settings
 
 ## Session Versioning
 
@@ -219,6 +328,24 @@ Additional enforcement:
 - `GATEWAY_FRONTDOOR_REQUIRE_PRIVY=true` requires `GATEWAY_FRONTDOOR_PRIVY_APP_ID` to be set; otherwise launch is blocked.
 - `POST /api/frontdoor/verify` cryptographically recovers signer address from the EIP-191 signed challenge and rejects mismatches.
 - `POST /api/frontdoor/suggest-config` always returns server-validated suggestions that pass the same policy checks used by verify/provision.
+
+## Validation Gates (Exact, Server-Enforced)
+
+- `wallet_address` and session wallet fields must be `0x`-prefixed 40-hex EVM addresses.
+- `signature` must be a `0x`-prefixed 65-byte hex payload; recovered signer must match `wallet_address`.
+- `session_id` must be UUID; verify requires exact challenge message match and unexpired challenge.
+- `config_version` must be one of `1` or `2`.
+- `profile_domain` must be normalized lowercase and match `[a-z0-9_-]` with max length `32`.
+- `domain_overrides` is limited to `32` keys; each key max `64` chars; each value max serialized size `4096` bytes.
+- `profile_name` is required and max `64` chars.
+- `gateway_auth_key` must be printable ASCII, no whitespace, length `16..128`.
+- `verification_backend` must be `eigencloud_primary` or `fallback_only`.
+- `verification_eigencloud_auth_scheme` must be `bearer` or `api_key`.
+- `verification_eigencloud_timeout_ms` must be `1..120000`.
+- `verification_backend=fallback_only` requires `verification_fallback_enabled=true`.
+- `verification_fallback_signing_key_id` max length is `128`; `verification_fallback_chain_path` must not contain newlines.
+- `accept_terms` must be `true`.
+- For `hyperliquid` domain: network/policy enums are enforced, request/risk bounds are validated, symbol lists are normalized and disjoint, and `mainnet + live_allowed` caps `max_position_size_usd` at `1_000_000`.
 
 ## Gasless Signature Notes
 

@@ -52,6 +52,7 @@ pub struct GatewayFrontdoorConfig {
     pub privy_client_id: Option<String>,
     pub provision_command: Option<String>,
     pub default_instance_url: Option<String>,
+    pub allow_default_instance_fallback: bool,
     pub verify_app_base_url: Option<String>,
     pub session_ttl_secs: u64,
     pub poll_interval_ms: u64,
@@ -107,6 +108,12 @@ impl ChannelsConfig {
                     ])?,
                     provision_command: optional_env("GATEWAY_FRONTDOOR_PROVISION_COMMAND")?,
                     default_instance_url: optional_env("GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL")?,
+                    allow_default_instance_fallback: first_non_empty_env(&[
+                        "GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK",
+                        "FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK",
+                    ])?
+                    .map(|s| s.eq_ignore_ascii_case("true") || s == "1")
+                    .unwrap_or(false),
                     verify_app_base_url: optional_env("GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL")?,
                     session_ttl_secs: optional_env("GATEWAY_FRONTDOOR_SESSION_TTL_SECS")?
                         .map(|s| s.parse())
@@ -238,6 +245,8 @@ mod tests {
             std::env::remove_var("FRONTDOOR_PRIVY_CLIENT_ID");
             std::env::remove_var("PRIVY_CLIENT_ID");
             std::env::remove_var("NEXT_PUBLIC_PRIVY_CLIENT_ID");
+            std::env::remove_var("GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK");
+            std::env::remove_var("FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK");
         }
     }
 
@@ -267,6 +276,7 @@ mod tests {
             frontdoor.privy_client_id.as_deref(),
             Some("legacy-client-id")
         );
+        assert!(!frontdoor.allow_default_instance_fallback);
 
         clear_frontdoor_env();
     }
@@ -299,6 +309,31 @@ mod tests {
             frontdoor.privy_client_id.as_deref(),
             Some("canonical-client-id")
         );
+        assert!(!frontdoor.allow_default_instance_fallback);
+
+        clear_frontdoor_env();
+    }
+
+    #[test]
+    fn frontdoor_fallback_opt_in_flag_is_explicit() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_frontdoor_env();
+
+        // SAFETY: Guarded by ENV_MUTEX in tests.
+        unsafe {
+            std::env::set_var("GATEWAY_ENABLED", "true");
+            std::env::set_var("GATEWAY_FRONTDOOR_ENABLED", "true");
+            std::env::set_var("GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK", "1");
+        }
+
+        let settings = Settings::default();
+        let cfg = ChannelsConfig::resolve(&settings).expect("channels resolve");
+        let frontdoor = cfg
+            .gateway
+            .expect("gateway config missing")
+            .frontdoor
+            .expect("frontdoor config missing");
+        assert!(frontdoor.allow_default_instance_fallback);
 
         clear_frontdoor_env();
     }

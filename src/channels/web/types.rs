@@ -759,6 +759,7 @@ pub struct FrontdoorBootstrapResponse {
     pub provisioning_backend: String,
     pub dynamic_provisioning_enabled: bool,
     pub default_instance_url_configured: bool,
+    pub default_instance_fallback_enabled: bool,
     pub default_instance_looks_eigencloud: bool,
     pub poll_interval_ms: u64,
     pub mandatory_steps: Vec<String>,
@@ -911,6 +912,41 @@ pub struct FrontdoorSuggestConfigResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct FrontdoorPolicyTemplateLibraryResponse {
+    pub generated_at: String,
+    pub templates: Vec<FrontdoorPolicyTemplate>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FrontdoorPolicyTemplate {
+    pub template_id: String,
+    pub title: String,
+    pub domain: String,
+    pub objective: String,
+    pub rationale: String,
+    pub module_plan: Vec<String>,
+    pub risk_profile: FrontdoorPolicyTemplateRiskProfile,
+    pub config: FrontdoorPolicyTemplateConfig,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FrontdoorPolicyTemplateRiskProfile {
+    pub posture: String,
+    pub max_position_size_usd: u64,
+    pub max_leverage: u32,
+    pub max_slippage_bps: u32,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct FrontdoorPolicyTemplateConfig {
+    pub paper_live_policy: String,
+    pub custody_mode: String,
+    pub verification_backend: String,
+    pub verification_fallback_require_signed_receipts: bool,
+    pub information_sharing_scope: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct FrontdoorConfigContractResponse {
     pub contract_id: String,
     pub current_config_version: u32,
@@ -995,16 +1031,11 @@ pub struct FrontdoorSessionResponse {
     pub detail: String,
     pub provisioning_source: String,
     pub dedicated_instance: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub launched_on_eigencloud: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_backend: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_fallback_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_fallback_require_signed_receipts: Option<bool>,
+    pub launched_on_eigencloud: bool,
+    pub verification_backend: String,
+    pub verification_level: String,
+    pub verification_fallback_enabled: bool,
+    pub verification_fallback_require_signed_receipts: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1018,6 +1049,13 @@ pub struct FrontdoorSessionResponse {
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
+    pub todo_open_required_count: usize,
+    pub todo_open_recommended_count: usize,
+    pub todo_status_summary: String,
+    pub runtime_state: String,
+    pub funding_preflight_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funding_preflight_failure_category: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1038,21 +1076,280 @@ pub struct FrontdoorSessionSummaryResponse {
     pub detail: String,
     pub provisioning_source: String,
     pub dedicated_instance: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub launched_on_eigencloud: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_backend: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_level: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_fallback_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub verification_fallback_require_signed_receipts: Option<bool>,
+    pub launched_on_eigencloud: bool,
+    pub verification_backend: String,
+    pub verification_level: String,
+    pub verification_fallback_enabled: bool,
+    pub verification_fallback_require_signed_receipts: bool,
     pub created_at: String,
     pub updated_at: String,
     pub expires_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub profile_name: Option<String>,
+    pub todo_open_required_count: usize,
+    pub todo_open_recommended_count: usize,
+    pub todo_status_summary: String,
+    pub runtime_state: String,
+    pub funding_preflight_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub funding_preflight_failure_category: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorExperienceManifestResponse {
+    pub manifest_version: u32,
+    pub steps: Vec<FrontdoorExperienceStep>,
+    pub capabilities: Vec<String>,
+    pub constraints: Vec<String>,
+    pub evidence_labels: Vec<FrontdoorEvidenceLabel>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorExperienceStep {
+    pub step_id: String,
+    pub title: String,
+    pub purpose_id: String,
+    pub user_value: String,
+    pub backend_contract: String,
+    pub artifact_binding: String,
+    pub state_inputs: Vec<String>,
+    pub success_state: String,
+    pub failure_state: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorEvidenceLabel {
+    pub key: String,
+    pub description: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FrontdoorOnboardingStateQuery {
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FrontdoorOnboardingChatRequest {
+    pub session_id: String,
+    pub message: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorOnboardingChatResponse {
+    pub session_id: String,
+    pub assistant_message: String,
+    pub state: FrontdoorOnboardingStateResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorOnboardingStateResponse {
+    pub session_id: String,
+    pub current_step: String,
+    pub completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    pub missing_fields: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step2_payload: Option<FrontdoorOnboardingStep2Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step3_payload: Option<FrontdoorOnboardingStep3Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step4_payload: Option<FrontdoorOnboardingStep4Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_artifact_id: Option<String>,
+    pub transcript: Vec<FrontdoorOnboardingTurn>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FrontdoorOnboardingTurn {
+    pub role: String,
+    pub message: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FrontdoorOnboardingStep2Payload {
+    pub objective: String,
+    pub proposed_profile_domain: String,
+    pub proposed_profile_name: String,
+    pub proposed_module_plan: Vec<String>,
+    pub proposed_verification_backend: String,
+    pub proposed_custody_mode: String,
+    pub risk_summary: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FrontdoorOnboardingStep3Payload {
+    pub required_variables: Vec<FrontdoorOnboardingRequiredVariable>,
+    pub unresolved_required_count: usize,
+    pub validation_status: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FrontdoorOnboardingRequiredVariable {
+    pub field: String,
+    pub required: bool,
+    pub status: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FrontdoorOnboardingStep4Payload {
+    pub ready_to_sign: bool,
+    pub confirmation_required: bool,
+    pub unresolved_required_fields: Vec<String>,
+    pub signature_action: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FrontdoorOnboardingTranscriptArtifactResponse {
+    pub artifact_id: String,
+    pub session_id: String,
+    pub wallet_address: String,
+    pub current_step: String,
+    pub completed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub objective: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step2_payload: Option<FrontdoorOnboardingStep2Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step3_payload: Option<FrontdoorOnboardingStep3Payload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step4_payload: Option<FrontdoorOnboardingStep4Payload>,
+    pub transcript: Vec<FrontdoorOnboardingTurn>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorSessionTimelineResponse {
+    pub session_id: String,
+    pub events: Vec<FrontdoorSessionTimelineEvent>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorSessionTimelineEvent {
+    pub seq_id: u64,
+    pub event_type: String,
+    pub status: String,
+    pub detail: String,
+    pub actor: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorVerificationExplanationResponse {
+    pub session_id: String,
+    pub backend: String,
+    pub level: String,
+    pub fallback_used: bool,
+    pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FrontdoorRuntimeControlRequest {
+    pub action: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorRuntimeControlResponse {
+    pub session_id: String,
+    pub action: String,
+    pub status: String,
+    pub runtime_state: String,
+    pub detail: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorGatewayTodosResponse {
+    pub session_id: String,
+    pub todo_open_required_count: usize,
+    pub todo_open_recommended_count: usize,
+    pub highest_priority: u8,
+    pub has_blocking_required_todos: bool,
+    pub required_todo_ids_in_priority_order: Vec<String>,
+    pub todo_status_summary: String,
+    pub todos: Vec<FrontdoorGatewayTodoItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorGatewayTodoItem {
+    pub todo_id: String,
+    pub severity: String,
+    pub status: String,
+    pub priority: u8,
+    pub entry_blocking: bool,
+    pub owner: String,
+    pub action: String,
+    pub evidence_refs: FrontdoorTodoEvidenceRefs,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorTodoEvidenceRefs {
+    pub session_id: String,
+    pub provisioning_source: String,
+    pub verification_level: String,
+    pub module_state: String,
+    pub control_state: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorFundingPreflightResponse {
+    pub session_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_category: Option<String>,
+    pub checks: Vec<FrontdoorFundingPreflightCheck>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorFundingPreflightCheck {
+    pub check_id: String,
+    pub status: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FrontdoorOperatorSessionListQuery {
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FrontdoorOperatorSessionMonitorResponse {
+    pub generated_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallet_address: Option<String>,
+    pub limit: usize,
+    pub total: usize,
+    pub sessions: Vec<FrontdoorSessionResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GatewayTodoListQuery {
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GatewayTodoListResponse {
+    pub generated_at: String,
+    pub total: usize,
+    pub sessions: Vec<FrontdoorGatewayTodosResponse>,
 }
 
 // --- Health ---

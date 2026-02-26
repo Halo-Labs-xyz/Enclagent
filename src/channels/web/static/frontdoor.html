@@ -32,11 +32,135 @@
       <div class="status-strip" id="bootstrap-status">Loading gateway configuration...</div>
     </section>
 
+    <section class="panel" id="module-state-panel">
+      <h2>0. Deterministic Module State</h2>
+      <p class="section-copy">
+        Explicit launch modules with backend contracts, artifact bindings, and deterministic state transitions. Use per-module dropdown details and pop-out view for focused inspection.
+      </p>
+      <div class="module-grid">
+        <article class="module-card" id="module-card-identity" data-module-id="identity">
+          <div class="module-head">
+            <h3>Identity</h3>
+            <span class="module-state-pill" id="module-state-identity">pending</span>
+          </div>
+          <p class="module-summary" id="module-summary-identity">Waiting for wallet binding.</p>
+          <p class="module-artifact-value" id="module-artifact-value-identity">Artifact pending.</p>
+          <dl class="module-contract">
+            <dt>Purpose ID</dt><dd id="module-purpose-identity">-</dd>
+            <dt>Backend Contract</dt><dd id="module-contract-identity">-</dd>
+            <dt>Artifact Binding</dt><dd id="module-artifact-identity">-</dd>
+            <dt>Success State</dt><dd id="module-success-identity">-</dd>
+            <dt>Failure State</dt><dd id="module-failure-identity">-</dd>
+          </dl>
+        </article>
+
+        <article class="module-card" id="module-card-policy" data-module-id="policy">
+          <div class="module-head">
+            <h3>Policy</h3>
+            <span class="module-state-pill" id="module-state-policy">locked</span>
+          </div>
+          <p class="module-summary" id="module-summary-policy">Awaiting identity completion.</p>
+          <p class="module-artifact-value" id="module-artifact-value-policy">Artifact pending.</p>
+          <dl class="module-contract">
+            <dt>Purpose ID</dt><dd id="module-purpose-policy">-</dd>
+            <dt>Backend Contract</dt><dd id="module-contract-policy">-</dd>
+            <dt>Artifact Binding</dt><dd id="module-artifact-policy">-</dd>
+            <dt>Success State</dt><dd id="module-success-policy">-</dd>
+            <dt>Failure State</dt><dd id="module-failure-policy">-</dd>
+          </dl>
+        </article>
+
+        <article class="module-card" id="module-card-verification" data-module-id="verification">
+          <div class="module-head">
+            <h3>Verification</h3>
+            <span class="module-state-pill" id="module-state-verification">locked</span>
+          </div>
+          <p class="module-summary" id="module-summary-verification">Awaiting policy submission.</p>
+          <p class="module-artifact-value" id="module-artifact-value-verification">Artifact pending.</p>
+          <dl class="module-contract">
+            <dt>Purpose ID</dt><dd id="module-purpose-verification">-</dd>
+            <dt>Backend Contract</dt><dd id="module-contract-verification">-</dd>
+            <dt>Artifact Binding</dt><dd id="module-artifact-verification">-</dd>
+            <dt>Success State</dt><dd id="module-success-verification">-</dd>
+            <dt>Failure State</dt><dd id="module-failure-verification">-</dd>
+          </dl>
+        </article>
+
+        <article class="module-card" id="module-card-provisioning" data-module-id="provisioning">
+          <div class="module-head">
+            <h3>Provisioning</h3>
+            <span class="module-state-pill" id="module-state-provisioning">locked</span>
+          </div>
+          <p class="module-summary" id="module-summary-provisioning">Awaiting verification success.</p>
+          <p class="module-artifact-value" id="module-artifact-value-provisioning">Artifact pending.</p>
+          <dl class="module-contract">
+            <dt>Purpose ID</dt><dd id="module-purpose-provisioning">-</dd>
+            <dt>Backend Contract</dt><dd id="module-contract-provisioning">-</dd>
+            <dt>Artifact Binding</dt><dd id="module-artifact-provisioning">-</dd>
+            <dt>Success State</dt><dd id="module-success-provisioning">-</dd>
+            <dt>Failure State</dt><dd id="module-failure-provisioning">-</dd>
+          </dl>
+        </article>
+
+        <article class="module-card" id="module-card-runtimecontrols" data-module-id="runtimecontrols">
+          <div class="module-head">
+            <h3>RuntimeControls</h3>
+            <span class="module-state-pill" id="module-state-runtimecontrols">locked</span>
+          </div>
+          <p class="module-summary" id="module-summary-runtimecontrols">Awaiting session runtime state.</p>
+          <p class="module-artifact-value" id="module-artifact-value-runtimecontrols">Artifact pending.</p>
+          <dl class="module-contract">
+            <dt>Purpose ID</dt><dd id="module-purpose-runtimecontrols">-</dd>
+            <dt>Backend Contract</dt><dd id="module-contract-runtimecontrols">-</dd>
+            <dt>Artifact Binding</dt><dd id="module-artifact-runtimecontrols">-</dd>
+            <dt>Success State</dt><dd id="module-success-runtimecontrols">-</dd>
+            <dt>Failure State</dt><dd id="module-failure-runtimecontrols">-</dd>
+          </dl>
+        </article>
+
+        <article class="module-card" id="module-card-evidence" data-module-id="evidence">
+          <div class="module-head">
+            <h3>Evidence</h3>
+            <span class="module-state-pill" id="module-state-evidence">locked</span>
+          </div>
+          <p class="module-summary" id="module-summary-evidence">Awaiting typed evidence surfaces.</p>
+          <p class="module-artifact-value" id="module-artifact-value-evidence">Artifact pending.</p>
+          <dl class="module-contract">
+            <dt>Purpose ID</dt><dd id="module-purpose-evidence">-</dd>
+            <dt>Backend Contract</dt><dd id="module-contract-evidence">-</dd>
+            <dt>Artifact Binding</dt><dd id="module-artifact-evidence">-</dd>
+            <dt>Success State</dt><dd id="module-success-evidence">-</dd>
+            <dt>Failure State</dt><dd id="module-failure-evidence">-</dd>
+          </dl>
+        </article>
+      </div>
+      <p class="hint" id="module-state-note">Loading experience manifest and session state machine.</p>
+      <p class="hint" id="module-next-action-note">Next action will render after bootstrap.</p>
+    </section>
+
     <section class="panel" id="wallet-panel">
       <h2>1. Identity Authentication</h2>
       <p class="section-copy">
-        Connect your wallet in Privy mode, then sign a gasless authorization transaction to verify wallet control.
+        Use the Privy provider chooser for wallet, email, or social entry, then complete wallet binding and sign a gasless authorization transaction.
       </p>
+      <div class="identity-path-group">
+        <p class="identity-path-title">Initial Entry Path</p>
+        <label>
+          <span>Provider Chooser</span>
+          <select id="identity-provider">
+            <option value="wallet">Wallet (Injected)</option>
+            <option value="email">Email (OTP)</option>
+            <option value="google">Google</option>
+            <option value="apple">Apple</option>
+            <option value="github">GitHub</option>
+            <option value="discord">Discord</option>
+            <option value="twitter">X / Twitter</option>
+          </select>
+        </label>
+        <p class="hint" id="identity-provider-note">Provider: wallet.</p>
+        <p class="hint" id="identity-entry-note">Wallet-first path selected.</p>
+        <p class="hint" id="identity-binding-note">Wallet binding pending.</p>
+      </div>
       <div class="field-grid">
         <label>
           <span>Wallet Address</span>
@@ -58,7 +182,7 @@
         </label>
       </div>
       <div class="actions">
-        <button id="connect-wallet-btn" class="btn-primary">Connect Wallet With Privy</button>
+        <button id="connect-wallet-btn" class="btn-primary">Connect With Privy</button>
       </div>
       <div class="error-text" id="wallet-error"></div>
     </section>
@@ -74,10 +198,23 @@
               <span>Intent For Config Suggestion</span>
               <textarea id="intent-prompt" rows="3" placeholder="Example: build a low-risk research agent with strict verification receipts"></textarea>
             </label>
+            <label>
+              <span>Typed Policy Template</span>
+              <select id="policy-template-select">
+                <option value="">Loading templates...</option>
+              </select>
+            </label>
+            <label>
+              <span>Template Domain</span>
+              <input id="policy-template-domain" type="text" value="general" readonly>
+            </label>
           </div>
+          <p class="hint" id="policy-template-details">Typed policy templates are loading.</p>
           <div class="actions">
+            <button id="apply-policy-template-btn" class="btn-secondary" type="button">Apply Template Defaults</button>
             <button id="suggest-config-btn" class="btn-secondary" type="button">Suggest Config</button>
           </div>
+          <p class="hint" id="policy-template-message"></p>
           <p class="hint" id="suggestion-message"></p>
           <div class="error-text" id="suggestion-error"></div>
         </div>
@@ -325,7 +462,118 @@
       <p class="hint" id="monitor-empty">No sessions found for this wallet.</p>
       <div class="error-text" id="monitor-error"></div>
     </section>
+
+    <section class="panel" id="typed-api-panel">
+      <h2>5. Typed Session APIs</h2>
+      <p class="section-copy">
+        Load deterministic typed API surfaces for onboarding state, timeline evidence, verification explanation, and gateway TODO posture.
+      </p>
+      <div class="field-grid">
+        <label class="full-width">
+          <span>Session ID</span>
+          <input id="typed-session-id" type="text" placeholder="Launch flow fills this automatically, or paste a session UUID">
+        </label>
+      </div>
+      <div class="actions">
+        <button id="load-typed-session-btn" class="btn-primary" type="button">Load Typed Session Data</button>
+      </div>
+      <div class="error-text" id="typed-session-error"></div>
+      <div class="proof-spotlight">
+        <article class="proof-card">
+          <h3>Verification Explanation</h3>
+          <p class="proof-value" id="proof-verification">No verification evidence loaded.</p>
+        </article>
+        <article class="proof-card">
+          <h3>Timeline</h3>
+          <p class="proof-value" id="proof-timeline">No session timeline loaded.</p>
+        </article>
+        <article class="proof-card">
+          <h3>Provisioning Source</h3>
+          <p class="proof-value" id="proof-provisioning">No provisioning source loaded.</p>
+        </article>
+        <article class="proof-card">
+          <h3>Fallback Posture</h3>
+          <p class="proof-value" id="proof-fallback">No fallback posture loaded.</p>
+        </article>
+        <article class="proof-card">
+          <h3>Runtime Controls</h3>
+          <p class="proof-value" id="proof-runtime">No runtime state loaded.</p>
+        </article>
+        <article class="proof-card">
+          <h3>TODO Status</h3>
+          <p class="proof-value" id="proof-todo">No TODO posture loaded.</p>
+        </article>
+      </div>
+      <div class="error-text" id="proof-error"></div>
+
+      <div class="typed-grid">
+        <article class="typed-card" id="onboarding-card">
+          <h3>Onboarding Chat State</h3>
+          <p class="typed-meta" id="onboarding-summary">Load a session to inspect onboarding progress.</p>
+          <div class="typed-scroll" id="onboarding-transcript"></div>
+          <label>
+            <span>Onboarding Message</span>
+            <textarea id="onboarding-chat-input" rows="2" placeholder="Describe objective or reply confirm plan"></textarea>
+          </label>
+          <div class="actions">
+            <button id="send-onboarding-chat-btn" class="btn-secondary" type="button">Send Onboarding Message</button>
+            <button id="onboarding-confirm-plan-btn" class="btn-secondary" type="button">Confirm Plan</button>
+            <button id="onboarding-confirm-sign-btn" class="btn-secondary" type="button">Confirm Sign</button>
+          </div>
+          <div class="error-text" id="onboarding-error"></div>
+        </article>
+
+        <article class="typed-card">
+          <h3>Session Timeline</h3>
+          <p class="typed-meta" id="timeline-summary">No timeline loaded.</p>
+          <div class="typed-scroll" id="timeline-events"></div>
+          <div class="error-text" id="timeline-error"></div>
+        </article>
+
+        <article class="typed-card">
+          <h3>Verification Explanation</h3>
+          <div class="typed-kv" id="verification-explanation-kv"></div>
+          <div class="error-text" id="verification-error"></div>
+        </article>
+
+        <article class="typed-card">
+          <h3>Gateway TODO Summary</h3>
+          <p class="typed-meta" id="gateway-todo-summary">No TODO summary loaded.</p>
+          <div class="typed-scroll" id="gateway-todo-list"></div>
+          <div class="error-text" id="gateway-todo-error"></div>
+        </article>
+
+        <article class="typed-card">
+          <h3>Runtime Controls</h3>
+          <p class="typed-meta" id="runtime-control-summary">Load a session to inspect and apply runtime controls.</p>
+          <div class="actions">
+            <button id="runtime-pause-btn" class="btn-secondary" type="button">Pause</button>
+            <button id="runtime-resume-btn" class="btn-secondary" type="button">Resume</button>
+            <button id="runtime-terminate-btn" class="btn-secondary" type="button">Terminate</button>
+            <button id="runtime-rotate-key-btn" class="btn-secondary" type="button">Rotate Auth Key</button>
+          </div>
+          <div class="error-text" id="runtime-control-error"></div>
+        </article>
+
+        <article class="typed-card">
+          <h3>Funding Preflight</h3>
+          <p class="typed-meta" id="funding-preflight-summary">No funding preflight loaded.</p>
+          <div class="typed-scroll" id="funding-preflight-checks"></div>
+          <div class="error-text" id="funding-preflight-error"></div>
+        </article>
+      </div>
+    </section>
   </main>
+
+  <div class="module-popover-backdrop hidden" id="module-popover-backdrop">
+    <section class="module-popover" role="dialog" aria-modal="true" aria-labelledby="module-popover-title">
+      <div class="module-popover-head">
+        <h3 id="module-popover-title">Module state</h3>
+        <button id="module-popover-close" type="button" class="module-popover-close" aria-label="Close module state pop out">Close</button>
+      </div>
+      <div id="module-popover-body"></div>
+    </section>
+  </div>
 
   <script src="/frontdoor.js"></script>
 </body>

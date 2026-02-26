@@ -15,6 +15,12 @@ const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 const OPS_REFRESH_INTERVAL_MS = 30000;
 let opsRefreshTimer = null;
+const QUICK_SURFACE_REFRESH_INTERVAL_MS = 15000;
+const QUICK_LOG_LIMIT = 120;
+let quickSurfaceRefreshTimer = null;
+let settingsPanelVisible = false;
+let recentLogs = [];
+const quickSurfaceState = { logs: false, history: false, usage: false };
 
 // --- Auth ---
 
@@ -38,15 +44,20 @@ function authenticate() {
       window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
       connectSSE();
       connectLogSSE();
+      initRuntimeInstanceLabel();
       startGatewayStatusPolling();
       loadThreads();
       loadMemoryTree();
+      refreshPrivateStorageLink();
       loadJobs();
+      loadSkills();
       loadOpsDashboard();
       startOpsRefresh();
+      startQuickSurfaceRefresh();
     })
     .catch(() => {
       stopOpsRefresh();
+      stopQuickSurfaceRefresh();
       sessionStorage.removeItem('enclagent_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
@@ -89,6 +100,26 @@ function tokenFromHash() {
   return tokenFromFragment && tokenFromFragment.trim() ? tokenFromFragment.trim() : null;
 }
 
+function initRuntimeInstanceLabel() {
+  const instanceEl = document.getElementById('runtime-instance');
+  if (!instanceEl) return;
+  const host = window.location.host || 'local';
+  instanceEl.textContent = 'runtime@' + host;
+}
+
+function setSseConnectionState(open) {
+  const dot = document.getElementById('sse-dot');
+  const status = document.getElementById('sse-status');
+  if (!dot || !status) return;
+  if (open) {
+    dot.classList.remove('disconnected');
+    status.textContent = 'Open';
+  } else {
+    dot.classList.add('disconnected');
+    status.textContent = 'Reconnecting';
+  }
+}
+
 // --- API helper ---
 
 function apiFetch(path, options) {
@@ -113,13 +144,11 @@ function connectSSE() {
   eventSource = new EventSource('/api/chat/events?token=' + encodeURIComponent(token));
 
   eventSource.onopen = () => {
-    document.getElementById('sse-dot').classList.remove('disconnected');
-    document.getElementById('sse-status').textContent = 'Connected';
+    setSseConnectionState(true);
   };
 
   eventSource.onerror = () => {
-    document.getElementById('sse-dot').classList.add('disconnected');
-    document.getElementById('sse-status').textContent = 'Reconnecting...';
+    setSseConnectionState(false);
   };
 
   eventSource.addEventListener('response', (e) => {
@@ -790,6 +819,16 @@ chatInput.addEventListener('keydown', (e) => {
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
 
+const skillsSearchQueryInput = document.getElementById('skills-search-query');
+if (skillsSearchQueryInput) {
+  skillsSearchQueryInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      searchSkills();
+    }
+  });
+}
+
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
   if (this.scrollTop < 100 && hasMore && !loadingOlder) {
@@ -818,6 +857,15 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
   });
 });
 
+document.querySelectorAll('.surface-toggle[data-surface-toggle]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const surface = btn.getAttribute('data-surface-toggle');
+    toggleQuickSurface(surface);
+  });
+});
+
+renderQuickSurfaceLayout();
+
 function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll('.tab-bar button[data-tab]').forEach((b) => {
@@ -827,6 +875,7 @@ function switchTab(tab) {
     p.classList.toggle('active', p.id === 'tab-' + tab);
   });
 
+  if (tab === 'skills') loadSkills();
   if (tab === 'ops') loadOpsDashboard();
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
@@ -847,6 +896,181 @@ function stopOpsRefresh() {
     clearInterval(opsRefreshTimer);
     opsRefreshTimer = null;
   }
+}
+
+function startQuickSurfaceRefresh() {
+  stopQuickSurfaceRefresh();
+  quickSurfaceRefreshTimer = setInterval(refreshQuickSurfaces, QUICK_SURFACE_REFRESH_INTERVAL_MS);
+}
+
+function stopQuickSurfaceRefresh() {
+  if (quickSurfaceRefreshTimer) {
+    clearInterval(quickSurfaceRefreshTimer);
+    quickSurfaceRefreshTimer = null;
+  }
+}
+
+function toggleQuickSurface(surface) {
+  if (!Object.prototype.hasOwnProperty.call(quickSurfaceState, surface)) return;
+  quickSurfaceState[surface] = !quickSurfaceState[surface];
+  renderQuickSurfaceLayout();
+  if (quickSurfaceState[surface]) refreshQuickSurface(surface);
+}
+
+function renderQuickSurfaceLayout() {
+  const panel = document.getElementById('quick-surfaces');
+  if (!panel) return;
+  const anyOpen = Object.values(quickSurfaceState).some(Boolean);
+  panel.classList.toggle('visible', anyOpen);
+
+  for (const surface of Object.keys(quickSurfaceState)) {
+    const button = document.querySelector('.surface-toggle[data-surface-toggle="' + surface + '"]');
+    const section = document.getElementById('quick-surface-' + surface);
+    const open = !!quickSurfaceState[surface];
+    if (button) {
+      button.classList.toggle('active', open);
+      button.setAttribute('aria-pressed', open ? 'true' : 'false');
+    }
+    if (section) {
+      section.classList.toggle('visible', open);
+    }
+  }
+}
+
+function refreshQuickSurfaces() {
+  for (const surface of Object.keys(quickSurfaceState)) {
+    if (quickSurfaceState[surface]) refreshQuickSurface(surface);
+  }
+}
+
+function refreshQuickSurface(surface) {
+  if (surface === 'logs') renderQuickLogsSurface();
+  if (surface === 'history') refreshQuickHistorySurface();
+  if (surface === 'usage') refreshQuickUsageSurface();
+}
+
+function renderQuickLogsSurface() {
+  const output = document.getElementById('quick-logs-output');
+  if (!output) return;
+  if (!recentLogs || recentLogs.length === 0) {
+    output.innerHTML = '<div class="empty-state">No logs yet</div>';
+    return;
+  }
+
+  const rows = recentLogs.slice(-50).reverse().map((entry) => {
+    const ts = entry.timestamp ? String(entry.timestamp).substring(11, 23) : '--:--:--.---';
+    const level = entry.level || 'INFO';
+    const target = entry.target || '-';
+    const message = entry.message || '';
+    return '<div class="quick-log-row level-' + escapeHtml(level) + '">'
+      + '<span class="quick-log-ts">' + escapeHtml(ts) + '</span>'
+      + '<span class="quick-log-level">' + escapeHtml(level) + '</span>'
+      + '<span class="quick-log-target">' + escapeHtml(target) + '</span>'
+      + '<span class="quick-log-msg">' + escapeHtml(message) + '</span>'
+      + '</div>';
+  });
+  output.innerHTML = rows.join('');
+}
+
+function refreshQuickHistorySurface() {
+  const output = document.getElementById('quick-history-output');
+  if (!output) return;
+
+  let historyPath = '/api/chat/history?limit=8';
+  if (currentThreadId) {
+    historyPath += '&thread_id=' + encodeURIComponent(currentThreadId);
+  }
+
+  Promise.all([
+    apiFetch('/api/chat/threads').catch(() => ({ threads: [], assistant_thread: null })),
+    apiFetch('/api/jobs').catch(() => ({ jobs: [] })),
+    apiFetch(historyPath).catch(() => ({ turns: [] })),
+  ]).then(([threadsData, jobsData, historyData]) => {
+    const assistantTurns = (threadsData.assistant_thread && threadsData.assistant_thread.turn_count) || 0;
+    const conversations = (threadsData.threads || []).length;
+    const jobs = (jobsData.jobs || []).slice(0, 4);
+    const turns = (historyData.turns || []).slice(-4).reverse();
+    const liveEvents = Array.from(jobEvents.values()).reduce((sum, events) => sum + events.length, 0);
+
+    const turnRows = turns.length > 0
+      ? turns.map((turn) => {
+        const input = turn.user_input ? shortenSurfaceText(turn.user_input, 100) : '';
+        const response = turn.response ? shortenSurfaceText(turn.response, 100) : '';
+        return '<div class="quick-history-row">'
+          + '<div class="quick-history-role">User</div>'
+          + '<div class="quick-history-content">' + escapeHtml(input) + '</div>'
+          + '<div class="quick-history-role">Assistant</div>'
+          + '<div class="quick-history-content">' + escapeHtml(response) + '</div>'
+          + '</div>';
+      }).join('')
+      : '<div class="empty-state">No thread turns yet</div>';
+
+    const jobRows = jobs.length > 0
+      ? jobs.map((job) => '<div class="quick-job-row">'
+        + '<span>' + escapeHtml((job.title || 'Job').slice(0, 36)) + '</span>'
+        + '<span class="badge ' + escapeHtml(String(job.state || 'pending').replace(' ', '_')) + '">'
+        + escapeHtml(job.state || 'pending') + '</span>'
+        + '</div>').join('')
+      : '<div class="empty-state">No recent jobs</div>';
+
+    output.innerHTML = ''
+      + '<div class="quick-metric-grid">'
+      + '<div class="quick-metric"><span>Assistant Turns</span><strong>' + escapeHtml(String(assistantTurns)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Conversations</span><strong>' + escapeHtml(String(conversations)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Live Events</span><strong>' + escapeHtml(String(liveEvents)) + '</strong></div>'
+      + '</div>'
+      + '<div class="quick-block-title">Recent Thread Turns</div>'
+      + '<div class="quick-history-list">' + turnRows + '</div>'
+      + '<div class="quick-block-title">Recent Jobs</div>'
+      + '<div class="quick-job-list">' + jobRows + '</div>';
+  }).catch((err) => {
+    output.innerHTML = '<div class="empty-state">Failed to load action history: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function refreshQuickUsageSurface() {
+  const output = document.getElementById('quick-usage-output');
+  if (!output) return;
+
+  Promise.all([
+    apiFetch('/api/jobs/summary').catch(() => null),
+    apiFetch('/api/chat/threads').catch(() => null),
+    apiFetch('/api/routines/summary').catch(() => null),
+    apiFetch('/api/gateway/status').catch(() => null),
+  ]).then(([jobs, threads, routines, gateway]) => {
+    const threadCount = threads ? ((threads.threads || []).length + ((threads.assistant_thread && threads.assistant_thread.id) ? 1 : 0)) : 0;
+    const turnCount = threads
+      ? ((threads.assistant_thread && threads.assistant_thread.turn_count) || 0)
+      + (threads.threads || []).reduce((sum, t) => sum + (t.turn_count || 0), 0)
+      : 0;
+    const inProgressJobs = jobs ? jobs.in_progress : 0;
+    const failedJobs = jobs ? jobs.failed : 0;
+    const routinesEnabled = routines ? routines.enabled : 0;
+    const runsToday = routines ? routines.runs_today : 0;
+    const sseClients = gateway ? gateway.sse_connections : 0;
+    const wsClients = gateway ? gateway.ws_connections : 0;
+    const runtimeStatus = gateway ? String(gateway.channel_status || 'unknown') : 'unknown';
+
+    output.innerHTML = ''
+      + '<div class="quick-metric-grid">'
+      + '<div class="quick-metric"><span>Threads</span><strong>' + escapeHtml(String(threadCount)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Total Turns</span><strong>' + escapeHtml(String(turnCount)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Jobs In Progress</span><strong>' + escapeHtml(String(inProgressJobs)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Jobs Failed</span><strong>' + escapeHtml(String(failedJobs)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Automations Enabled</span><strong>' + escapeHtml(String(routinesEnabled)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Runs Today</span><strong>' + escapeHtml(String(runsToday)) + '</strong></div>'
+      + '<div class="quick-metric"><span>SSE/WS Clients</span><strong>' + escapeHtml(String(sseClients)) + ' / ' + escapeHtml(String(wsClients)) + '</strong></div>'
+      + '<div class="quick-metric"><span>Runtime Status</span><strong>' + escapeHtml(runtimeStatus) + '</strong></div>'
+      + '</div>';
+  }).catch((err) => {
+    output.innerHTML = '<div class="empty-state">Failed to load usage: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function shortenSurfaceText(text, maxLen) {
+  const raw = String(text || '');
+  if (raw.length <= maxLen) return raw;
+  return raw.slice(0, maxLen) + '...';
 }
 
 function readSetting(settings, key, fallback) {
@@ -1090,6 +1314,23 @@ if (opsDashboard) {
   });
 }
 
+function openPrivateStorageTree() {
+  switchTab('memory');
+}
+
+function refreshPrivateStorageLink() {
+  const meta = document.getElementById('private-storage-meta');
+  if (!meta) return;
+  apiFetch('/api/memory/tree').then((data) => {
+    const entries = (data && data.entries) || [];
+    const files = entries.filter((e) => e && !e.is_dir).length;
+    const dirs = entries.filter((e) => e && e.is_dir).length;
+    meta.textContent = files + ' files, ' + dirs + ' directories';
+  }).catch(() => {
+    meta.textContent = 'Private storage unavailable';
+  });
+}
+
 // --- Memory (filesystem tree) ---
 
 let memorySearchTimeout = null;
@@ -1121,6 +1362,7 @@ function loadMemoryTree() {
       loaded: false,
     }));
     renderTree();
+    refreshPrivateStorageLink();
   }).catch(() => {});
 }
 
@@ -1338,6 +1580,9 @@ function connectLogSSE() {
 
   logEventSource.addEventListener('log', (e) => {
     const entry = JSON.parse(e.data);
+    recentLogs.push(entry);
+    while (recentLogs.length > QUICK_LOG_LIMIT) recentLogs.shift();
+    if (quickSurfaceState.logs) renderQuickLogsSurface();
     if (logsPaused) {
       logBuffer.push(entry);
       return;
@@ -1437,6 +1682,174 @@ function applyLogFilters() {
     const matchesTarget = !targetFilter || el.getAttribute('data-target').toLowerCase().includes(targetFilter);
     el.style.display = (matchesLevel && matchesTarget) ? '' : 'none';
   }
+}
+
+// --- Skills ---
+
+function loadSkills() {
+  const installedList = document.getElementById('skills-installed-list');
+  const summary = document.getElementById('skills-summary');
+  if (!installedList || !summary) return;
+
+  installedList.innerHTML = '<div class="empty-state">Loading installed skills...</div>';
+
+  apiFetch('/api/skills').then((data) => {
+    const skills = (data && data.skills) || [];
+    renderSkillsSummary(skills);
+    renderInstalledSkills(skills);
+  }).catch((err) => {
+    summary.innerHTML = '<div class="summary-card failed"><div class="count">0</div><div class="label">Skills Unavailable</div></div>';
+    installedList.innerHTML = '<div class="empty-state">Failed to load skills: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderSkillsSummary(skills) {
+  const summary = document.getElementById('skills-summary');
+  if (!summary) return;
+  const trusted = skills.filter((s) => String(s.trust).toLowerCase() === 'trusted').length;
+  const installed = skills.filter((s) => String(s.trust).toLowerCase() === 'installed').length;
+  summary.innerHTML = ''
+    + summaryCard('Total', skills.length, '')
+    + summaryCard('Trusted', trusted, 'completed')
+    + summaryCard('Installed', installed, 'active');
+}
+
+function renderInstalledSkills(skills) {
+  const installedList = document.getElementById('skills-installed-list');
+  if (!installedList) return;
+  if (!skills || skills.length === 0) {
+    installedList.innerHTML = '<div class="empty-state">No skills installed</div>';
+    return;
+  }
+
+  installedList.innerHTML = '';
+  for (const skill of skills) {
+    const card = document.createElement('div');
+    card.className = 'skill-card';
+    card.innerHTML = '<div class="skill-card-header">'
+      + '<span class="skill-name">' + escapeHtml(skill.name) + '</span>'
+      + '<span class="badge ' + (String(skill.trust).toLowerCase() === 'trusted' ? 'completed' : 'in_progress') + '">'
+      + escapeHtml(skill.trust) + '</span>'
+      + '</div>'
+      + '<div class="skill-description">' + escapeHtml(skill.description || 'No description') + '</div>'
+      + '<div class="skill-metadata">'
+      + '<span>v' + escapeHtml(skill.version || '-') + '</span>'
+      + '<span>' + escapeHtml(skill.source || '-') + '</span>'
+      + '</div>';
+
+    if (skill.keywords && skill.keywords.length > 0) {
+      const keywords = document.createElement('div');
+      keywords.className = 'skill-keywords';
+      keywords.innerHTML = skill.keywords
+        .slice(0, 8)
+        .map((k) => '<span class="skill-keyword">' + escapeHtml(k) + '</span>')
+        .join('');
+      card.appendChild(keywords);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'skill-actions';
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-cancel';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', () => removeSkill(skill.name));
+    actions.appendChild(removeBtn);
+    card.appendChild(actions);
+    installedList.appendChild(card);
+  }
+}
+
+function searchSkills() {
+  const queryInput = document.getElementById('skills-search-query');
+  const catalogList = document.getElementById('skills-catalog-list');
+  if (!queryInput || !catalogList) return;
+  const query = queryInput.value.trim();
+  if (!query) {
+    catalogList.innerHTML = '<div class="empty-state">Enter a search term</div>';
+    return;
+  }
+
+  catalogList.innerHTML = '<div class="empty-state">Searching catalog...</div>';
+  apiFetch('/api/skills/search', {
+    method: 'POST',
+    body: { query },
+  }).then((data) => {
+    const results = (data && data.catalog) || [];
+    renderCatalogSkills(results);
+  }).catch((err) => {
+    catalogList.innerHTML = '<div class="empty-state">Search failed: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderCatalogSkills(results) {
+  const catalogList = document.getElementById('skills-catalog-list');
+  if (!catalogList) return;
+  if (!results || results.length === 0) {
+    catalogList.innerHTML = '<div class="empty-state">No catalog results</div>';
+    return;
+  }
+
+  catalogList.innerHTML = '';
+  for (const item of results) {
+    const slug = item.slug || item.name;
+    const card = document.createElement('div');
+    card.className = 'skill-card catalog-card';
+    card.innerHTML = '<div class="skill-card-header">'
+      + '<span class="skill-name">' + escapeHtml(item.name || slug) + '</span>'
+      + '<span class="badge in_progress">score ' + escapeHtml(String(item.score || 0)) + '</span>'
+      + '</div>'
+      + '<div class="skill-description">' + escapeHtml(item.description || 'No description') + '</div>'
+      + '<div class="skill-metadata">'
+      + '<span>v' + escapeHtml(item.version || '-') + '</span>'
+      + '<span>' + escapeHtml(slug || '-') + '</span>'
+      + '</div>';
+
+    const actions = document.createElement('div');
+    actions.className = 'skill-actions';
+    const installBtn = document.createElement('button');
+    installBtn.className = 'btn-restart';
+    installBtn.textContent = 'Install';
+    installBtn.addEventListener('click', () => installSkill(slug));
+    actions.appendChild(installBtn);
+    card.appendChild(actions);
+    catalogList.appendChild(card);
+  }
+}
+
+function installSkill(name) {
+  if (!name) return;
+  apiFetch('/api/skills/install', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: { name },
+  }).then((res) => {
+    if (res && res.success) {
+      showToast(res.message || ('Installed ' + name), 'success');
+      loadSkills();
+      return;
+    }
+    showToast((res && res.message) || ('Install failed for ' + name), 'error');
+  }).catch((err) => {
+    showToast('Install failed: ' + err.message, 'error');
+  });
+}
+
+function removeSkill(name) {
+  if (!name) return;
+  if (!confirm('Remove skill "' + name + '"?')) return;
+  apiFetch('/api/skills/' + encodeURIComponent(name), {
+    method: 'DELETE',
+    headers: { 'X-Confirm-Action': 'true' },
+  }).then((res) => {
+    if (res && res.success) {
+      showToast(res.message || ('Removed ' + name), 'success');
+      loadSkills();
+      return;
+    }
+    showToast((res && res.message) || ('Removal failed for ' + name), 'error');
+  }).catch((err) => {
+    showToast('Remove failed: ' + err.message, 'error');
+  });
 }
 
 // --- Extensions ---
@@ -2326,8 +2739,64 @@ function fetchGatewayStatus() {
     const popover = document.getElementById('gateway-popover');
     popover.innerHTML = '<div class="gw-stat"><span>SSE clients</span><span>' + (data.sse_connections || 0) + '</span></div>'
       + '<div class="gw-stat"><span>WS clients</span><span>' + (data.ws_connections || 0) + '</span></div>'
-      + '<div class="gw-stat"><span>Total</span><span>' + (data.total_connections || 0) + '</span></div>';
+      + '<div class="gw-stat"><span>Total</span><span>' + (data.total_connections || 0) + '</span></div>'
+      + '<div class="gw-stat"><span>Channels</span><span>' + escapeHtml(String(data.channel_status || 'unknown')) + '</span></div>'
+      + '<div class="gw-stat"><span>Verification</span><span>' + escapeHtml(String(data.verification_status || 'unknown')) + '</span></div>';
+    if (data.routine_webhook_status) {
+      popover.innerHTML += '<div class="gw-stat"><span>Automation Webhooks</span><span>'
+        + escapeHtml(String(data.routine_webhook_status))
+        + '</span></div>';
+    }
+    if (quickSurfaceState.usage) refreshQuickUsageSurface();
   }).catch(() => {});
+}
+
+function toggleSettingsPanel() {
+  settingsPanelVisible = !settingsPanelVisible;
+  const panel = document.getElementById('settings-panel');
+  if (!panel) return;
+  panel.classList.toggle('visible', settingsPanelVisible);
+  if (settingsPanelVisible) loadSettingsPanel();
+}
+
+function loadSettingsPanel() {
+  const body = document.getElementById('settings-panel-body');
+  if (!body) return;
+
+  Promise.all([
+    apiFetch('/api/settings/export').catch(() => ({ settings: {} })),
+    apiFetch('/api/gateway/status').catch(() => null),
+  ]).then(([settingsData, gateway]) => {
+    const settings = (settingsData && settingsData.settings) || {};
+
+    body.innerHTML = ''
+      + '<div class="setting-row"><span>Runtime Instance</span><strong>'
+      + escapeHtml('runtime@' + (window.location.host || 'local'))
+      + '</strong></div>'
+      + '<div class="setting-row"><span>Gateway Channel Status</span><strong>'
+      + escapeHtml(gateway ? String(gateway.channel_status || 'unknown') : 'unknown')
+      + '</strong></div>'
+      + '<div class="setting-row"><span>LLM Backend</span><strong>'
+      + escapeHtml(String(readSetting(settings, 'llm_backend', 'not configured')))
+      + '</strong></div>'
+      + '<div class="setting-row"><span>Selected Model</span><strong>'
+      + escapeHtml(String(readSetting(settings, 'selected_model', 'not selected')))
+      + '</strong></div>'
+      + '<div class="setting-row"><span>Hyperliquid Network</span><strong>'
+      + escapeHtml(String(readSetting(settings, 'hyperliquid_runtime.network', 'testnet')))
+      + '</strong></div>'
+      + '<div class="setting-row"><span>Custody Mode</span><strong>'
+      + escapeHtml(String(readSetting(settings, 'wallet_vault_policy.custody_mode', 'operator_wallet')))
+      + '</strong></div>'
+      + '<div class="setting-row"><span>Verification Backend</span><strong>'
+      + escapeHtml(String(readSetting(settings, 'verification_backend.backend', 'not configured')))
+      + '</strong></div>'
+      + '<div class="setting-row"><span>Embeddings Enabled</span><strong>'
+      + escapeHtml(boolLabel(toBoolean(readSetting(settings, 'embeddings.enabled', false), false)))
+      + '</strong></div>';
+  }).catch((err) => {
+    body.innerHTML = '<div class="empty-state">Failed to load settings: ' + escapeHtml(err.message) + '</div>';
+  });
 }
 
 // Show/hide popover on hover
@@ -2373,10 +2842,11 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   const inInput = tag === 'input' || tag === 'textarea';
 
-  // Mod+1-7: switch tabs
-  if (mod && e.key >= '1' && e.key <= '7') {
+  // Mod+1-9: switch tabs
+  if (mod && /^[1-9]$/.test(e.key)) {
     e.preventDefault();
-    const tabs = ['chat', 'ops', 'memory', 'jobs', 'routines', 'logs', 'extensions'];
+    const tabs = Array.from(document.querySelectorAll('.tab-bar button[data-tab]'))
+      .map((button) => button.getAttribute('data-tab'));
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
@@ -2443,4 +2913,6 @@ function formatDate(isoString) {
 
 window.addEventListener('beforeunload', () => {
   stopOpsRefresh();
+  stopQuickSurfaceRefresh();
+  if (gatewayStatusInterval) clearInterval(gatewayStatusInterval);
 });

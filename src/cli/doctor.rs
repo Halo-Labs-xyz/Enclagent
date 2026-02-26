@@ -73,6 +73,13 @@ async fn run_full_doctor(strict: bool) -> anyhow::Result<()> {
     );
 
     check(
+        "Frontdoor provisioning config",
+        check_frontdoor_provisioning(),
+        &mut passed,
+        &mut failed,
+    );
+
+    check(
         "Hyperliquid API reachability",
         check_hyperliquid_api_reachability(&hyperliquid_context).await,
         &mut passed,
@@ -176,6 +183,13 @@ async fn run_startup_checks(strict: bool) -> anyhow::Result<()> {
     check(
         "MCP startup preflight",
         check_mcp_startup_preflight(Some(Duration::from_secs(3))).await,
+        &mut passed,
+        &mut failed,
+    );
+
+    check(
+        "Frontdoor provisioning config",
+        check_frontdoor_provisioning(),
         &mut passed,
         &mut failed,
     );
@@ -530,6 +544,194 @@ fn check_fallback_chain_path(chain_path: &std::path::Path) -> CheckResult {
     ))
 }
 
+fn check_frontdoor_provisioning() -> CheckResult {
+    let settings = match load_settings_for_doctor() {
+        Ok(settings) => settings,
+        Err(error) => return CheckResult::Fail(error),
+    };
+
+    let channels = match crate::config::ChannelsConfig::resolve(&settings) {
+        Ok(channels) => channels,
+        Err(error) => return CheckResult::Fail(format!("channels config invalid: {error}")),
+    };
+
+    let gateway = match channels.gateway {
+        Some(gateway) => gateway,
+        None => return CheckResult::Skip("gateway disabled".to_string()),
+    };
+
+    let frontdoor = match gateway.frontdoor {
+        Some(frontdoor) => frontdoor,
+        None => return CheckResult::Skip("frontdoor disabled".to_string()),
+    };
+
+    validate_frontdoor_provisioning_semantics(
+        frontdoor.require_privy,
+        frontdoor.privy_app_id.as_deref(),
+        frontdoor.provision_command.as_deref(),
+        frontdoor.default_instance_url.as_deref(),
+        frontdoor.allow_default_instance_fallback,
+    )
+}
+
+fn validate_frontdoor_provisioning_semantics(
+    require_privy: bool,
+    privy_app_id: Option<&str>,
+    provision_command: Option<&str>,
+    default_instance_url: Option<&str>,
+    allow_default_instance_fallback: bool,
+) -> CheckResult {
+    let mut issues = Vec::new();
+
+    let normalized_privy_app_id = normalized_non_empty(privy_app_id);
+    let normalized_command = normalized_non_empty(provision_command);
+    let normalized_default_url = normalized_non_empty(default_instance_url);
+
+    if require_privy && normalized_privy_app_id.is_none() {
+        issues.push(
+            "Privy is required; set GATEWAY_FRONTDOOR_PRIVY_APP_ID (or FRONTDOOR_PRIVY_APP_ID / PRIVY_APP_ID / NEXT_PUBLIC_PRIVY_APP_ID)"
+                .to_string(),
+        );
+    }
+
+    let command_ready = match normalized_command {
+        Some(template) => match validate_frontdoor_provision_command_template(template) {
+            Ok(()) => true,
+            Err(error) => {
+                issues.push(format!(
+                    "GATEWAY_FRONTDOOR_PROVISION_COMMAND malformed: {error}. Use placeholders like {{session_id}} and {{wallet_address}}"
+                ));
+                false
+            }
+        },
+        None => false,
+    };
+
+    let fallback_ready = if allow_default_instance_fallback {
+        match normalized_default_url {
+            Some(url) => match validate_frontdoor_default_instance_url(url) {
+                Ok(()) => true,
+                Err(error) => {
+                    issues.push(format!(
+                        "GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL invalid: {error}. Use http(s) URL or disable GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK"
+                    ));
+                    false
+                }
+            },
+            None => {
+                issues.push("fallback enabled but GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL is empty; set URL or disable GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK".to_string());
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !command_ready && !fallback_ready {
+        issues.push("no provisioning backend; set GATEWAY_FRONTDOOR_PROVISION_COMMAND or enable GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK=1 with GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL".to_string());
+    }
+
+    if issues.is_empty() {
+        let backend = if command_ready {
+            "command"
+        } else {
+            "default_instance_url fallback"
+        };
+        CheckResult::Pass(format!("frontdoor provisioning ready ({backend})"))
+    } else {
+        CheckResult::Fail(issues.join("; "))
+    }
+}
+
+fn normalized_non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn validate_frontdoor_default_instance_url(url: &str) -> Result<(), String> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("must be a valid URL: {e}"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("must use http or https scheme".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("must include a hostname".to_string());
+    }
+    Ok(())
+}
+
+fn validate_frontdoor_provision_command_template(template: &str) -> Result<(), String> {
+    let trimmed = template.trim();
+    if trimmed.is_empty() {
+        return Err("provision command template is empty".to_string());
+    }
+
+    let bytes = trimmed.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] != b'{' || (idx > 0 && bytes[idx - 1] == b'$') {
+            idx = idx.saturating_add(1);
+            continue;
+        }
+
+        let mut end = idx.saturating_add(1);
+        while end < bytes.len() && bytes[end] != b'}' {
+            end = end.saturating_add(1);
+        }
+        if end >= bytes.len() {
+            return Err("provision command template has unmatched '{'".to_string());
+        }
+
+        let token = &trimmed[idx + 1..end];
+        if !token.is_empty()
+            && token
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            && !is_allowed_frontdoor_placeholder(token)
+        {
+            return Err(format!("unsupported placeholder '{{{token}}}'"));
+        }
+
+        idx = end.saturating_add(1);
+    }
+
+    Ok(())
+}
+
+fn is_allowed_frontdoor_placeholder(token: &str) -> bool {
+    matches!(
+        token,
+        "session_id"
+            | "wallet_address"
+            | "privy_user_id"
+            | "privy_identity_token"
+            | "privy_access_token"
+            | "chain_id"
+            | "version"
+            | "config_version"
+            | "profile_domain"
+            | "domain_overrides_json"
+            | "profile_name"
+            | "custody_mode"
+            | "operator_wallet_address"
+            | "user_wallet_address"
+            | "vault_address"
+            | "gateway_auth_key"
+            | "eigencloud_auth_key"
+            | "verification_backend"
+            | "verification_eigencloud_endpoint"
+            | "verification_eigencloud_auth_scheme"
+            | "verification_eigencloud_timeout_ms"
+            | "verification_fallback_enabled"
+            | "verification_fallback_signing_key_id"
+            | "verification_fallback_chain_path"
+            | "verification_fallback_require_signed_receipts"
+            | "verify_app_base_url"
+            | "inference_summary"
+            | "inference_confidence"
+            | "config_json"
+            | "config_b64"
+    )
+}
+
 fn validate_wallet_credential(
     label: &str,
     value: Option<&str>,
@@ -859,6 +1061,107 @@ mod tests {
     fn redact_url_hides_credentials() {
         let redacted = redact_url_for_display("https://user:pass@example.com/v1/check");
         assert!(redacted.contains("redacted:redacted@example.com"));
+    }
+
+    #[test]
+    fn frontdoor_doctor_requires_privy_app_id_when_privy_required() {
+        let result = validate_frontdoor_provisioning_semantics(
+            true,
+            None,
+            Some("deploy --session {session_id}"),
+            None,
+            false,
+        );
+        match result {
+            CheckResult::Fail(message) => {
+                assert!(message.contains("GATEWAY_FRONTDOOR_PRIVY_APP_ID"));
+            }
+            other => panic!(
+                "expected Fail for missing privy_app_id, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn frontdoor_doctor_requires_command_or_explicit_fallback() {
+        let result = validate_frontdoor_provisioning_semantics(
+            false,
+            None,
+            None,
+            Some("https://enclave.example"),
+            false,
+        );
+        match result {
+            CheckResult::Fail(message) => {
+                assert!(message.contains("no provisioning backend"));
+            }
+            other => panic!(
+                "expected Fail when backend is unconfigured, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn frontdoor_doctor_rejects_malformed_provision_command_template() {
+        let result = validate_frontdoor_provisioning_semantics(
+            false,
+            None,
+            Some("deploy --session {unsupported_token}"),
+            Some("https://enclave.example"),
+            true,
+        );
+        match result {
+            CheckResult::Fail(message) => {
+                assert!(message.contains("GATEWAY_FRONTDOOR_PROVISION_COMMAND malformed"));
+                assert!(message.contains("unsupported placeholder"));
+            }
+            other => panic!(
+                "expected Fail for malformed provision command template, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn frontdoor_doctor_rejects_invalid_default_fallback_url() {
+        let result = validate_frontdoor_provisioning_semantics(
+            false,
+            None,
+            None,
+            Some("ftp://enclave.example"),
+            true,
+        );
+        match result {
+            CheckResult::Fail(message) => {
+                assert!(message.contains("GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL invalid"));
+            }
+            other => panic!(
+                "expected Fail for invalid fallback URL, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn frontdoor_doctor_accepts_valid_default_fallback_backend() {
+        let result = validate_frontdoor_provisioning_semantics(
+            false,
+            None,
+            None,
+            Some("https://enclave.example"),
+            true,
+        );
+        match result {
+            CheckResult::Pass(message) => {
+                assert!(message.contains("default_instance_url fallback"));
+            }
+            other => panic!(
+                "expected Pass for valid default fallback backend, got: {}",
+                format_result(&other)
+            ),
+        }
     }
 
     fn format_result(r: &CheckResult) -> String {

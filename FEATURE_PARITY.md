@@ -561,6 +561,15 @@ This document tracks feature parity between Enclagent (Rust implementation) and 
 | Versioned frontdoor config contract | ❌ | ✅ | `config_version`, `profile_domain`, extensible `domain_overrides` |
 | Inference-driven config suggestion API | ❌ | ✅ | `POST /api/frontdoor/suggest-config` with server-side validation |
 | Frontdoor config introspection endpoint | ❌ | ✅ | `GET /api/frontdoor/config-contract` |
+| Frontdoor policy template library endpoint | ❌ | ✅ | `GET /api/frontdoor/policy-templates` with typed templates, risk profile, and config defaults |
+| Frontdoor experience manifest endpoint | ❌ | ✅ | `GET /api/frontdoor/experience/manifest` with typed steps/capabilities/constraints/evidence labels |
+| Frontdoor onboarding APIs | ❌ | ✅ | `GET/POST /api/frontdoor/onboarding/*` state machine + static frontdoor typed UI wiring (state/chat/transcript) |
+| Session timeline endpoint | ❌ | ✅ | `GET /api/frontdoor/session/{session_id}/timeline` with monotonic `seq_id` events |
+| Verification explanation endpoint | ❌ | ✅ | `GET /api/frontdoor/session/{session_id}/verification-explanation` (`backend`, `level`, `fallback_used`, `latency_ms`, `failure_reason`) |
+| Runtime control endpoint | ❌ | ✅ | `POST /api/frontdoor/session/{session_id}/runtime-control` supports `pause`, `resume`, `terminate`, `rotate_auth_key` |
+| Gateway TODO feed endpoints | ❌ | ✅ | `GET /api/frontdoor/session/{session_id}/gateway-todos` + protected `GET /api/gateway/todos` |
+| Funding preflight endpoint | ❌ | ✅ | `GET /api/frontdoor/session/{session_id}/funding-preflight` with categorized failures (`gas`, `fee`, `auth`, `policy`) |
+| Public/operator session monitor split | ❌ | ✅ | Public redacted `GET /api/frontdoor/sessions` (wallet filter required) + protected full `GET /api/frontdoor/operator/sessions` |
 | Terminal-native frontdoor launch flow | ❌ | ✅ | `hc frontdoor launch` + session polling |
 | Terminal-native suggest flow | ❌ | ✅ | `hc frontdoor suggest <intent>` |
 | Launchpad dashboard (memory + A2A + enclave monitor) | ❌ | ✅ | `/launchpad` view in Bridge app |
