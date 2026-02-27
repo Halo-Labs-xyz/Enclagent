@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enclagent Launchpad</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/launchpad.css">
+</head>
+<body>
+  <div class="lp-bg lp-bg-a"></div>
+  <div class="lp-bg lp-bg-b"></div>
+
+  <main class="lp-shell">
+    <header class="lp-header">
+      <div>
+        <p class="lp-eyebrow">Enclagent Gateway Launchpad</p>
+        <h1>Chat-Led Enclave Setup</h1>
+      </div>
+      <div class="lp-environment" id="environment-pill">Environment</div>
+    </header>
+
+    <section class="lp-grid">
+      <article class="lp-chat-card">
+        <div class="lp-chat-head">
+          <h2>Launchpad Chat</h2>
+          <p id="chat-subtitle">Identity, objective, policy, signature, provisioning.</p>
+        </div>
+        <div class="lp-chat-stream" id="chat-stream"></div>
+        <div class="lp-chat-actions" id="chat-actions"></div>
+        <form class="lp-chat-compose" id="chat-form">
+          <textarea id="chat-input" rows="1" placeholder="Describe what you want this agent to do..." disabled></textarea>
+          <button type="submit" id="chat-send" disabled>Send</button>
+        </form>
+      </article>
+
+      <aside class="lp-side-card">
+        <section class="lp-side-block">
+          <h3>Step Progress</h3>
+          <div class="lp-steps" id="step-list">
+            <div class="lp-step" data-step="identity">
+              <span class="lp-step-dot"></span>
+              <div>
+                <p class="lp-step-title">1. Privy Signup</p>
+                <p class="lp-step-desc" id="step-desc-identity">Pending wallet identity.</p>
+              </div>
+            </div>
+            <div class="lp-step" data-step="objective">
+              <span class="lp-step-dot"></span>
+              <div>
+                <p class="lp-step-title">2. Objective</p>
+                <p class="lp-step-desc" id="step-desc-objective">Waiting for your goal.</p>
+              </div>
+            </div>
+            <div class="lp-step" data-step="config">
+              <span class="lp-step-dot"></span>
+              <div>
+                <p class="lp-step-title">3. Config Draft</p>
+                <p class="lp-step-desc" id="step-desc-config">Not generated yet.</p>
+              </div>
+            </div>
+            <div class="lp-step" data-step="decision">
+              <span class="lp-step-dot"></span>
+              <div>
+                <p class="lp-step-title">4. Runtime Decision</p>
+                <p class="lp-step-desc" id="step-desc-decision">No decision yet.</p>
+              </div>
+            </div>
+            <div class="lp-step" data-step="signature">
+              <span class="lp-step-dot"></span>
+              <div>
+                <p class="lp-step-title">5. Signature</p>
+                <p class="lp-step-desc" id="step-desc-signature">Awaiting challenge issue.</p>
+              </div>
+            </div>
+            <div class="lp-step" data-step="provisioning">
+              <span class="lp-step-dot"></span>
+              <div>
+                <p class="lp-step-title">6. Provisioning</p>
+                <p class="lp-step-desc" id="step-desc-provisioning">No instance yet.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="lp-side-block" id="identity-card">
+          <h3>Privy Identity</h3>
+          <div class="privy-dual">
+            <div class="privy-panel">
+              <p class="privy-panel-title">Login or sign up</p>
+              <div id="privy-connect-root"></div>
+              <button id="connect-wallet-btn" class="privy-fallback hidden" type="button">Connect wallet</button>
+              <p class="privy-hint">Use Privy to authenticate before configuration starts.</p>
+            </div>
+            <div class="privy-panel">
+              <p class="privy-panel-title">Funding pathways</p>
+              <ul class="privy-funding-list">
+                <li>Credit or debit card</li>
+                <li>Coinbase Onramp</li>
+                <li>MetaMask</li>
+                <li>MoonPay</li>
+              </ul>
+              <p class="privy-hint">Funding checks run before dedicated provisioning when required.</p>
+            </div>
+          </div>
+          <div class="lp-inline-meta" id="identity-meta">Not connected.</div>
+        </section>
+
+        <section class="lp-side-block" id="config-summary-block">
+          <h3>Configuration Summary</h3>
+          <div class="lp-kv" id="config-summary">
+            <div class="lp-kv-row"><span>Profile</span><strong>Pending</strong></div>
+            <div class="lp-kv-row"><span>Domain</span><strong>Pending</strong></div>
+            <div class="lp-kv-row"><span>Custody</span><strong>Pending</strong></div>
+            <div class="lp-kv-row"><span>Verification</span><strong>Pending</strong></div>
+            <div class="lp-kv-row"><span>Gateway Auth Key</span><strong>Pending</strong></div>
+          </div>
+        </section>
+
+        <section class="lp-side-block" id="session-summary-block">
+          <h3>Session Status</h3>
+          <div class="lp-kv" id="session-summary">
+            <div class="lp-kv-row"><span>Session</span><strong>-</strong></div>
+            <div class="lp-kv-row"><span>Status</span><strong>Not started</strong></div>
+            <div class="lp-kv-row"><span>Provisioning Source</span><strong>-</strong></div>
+            <div class="lp-kv-row"><span>Runtime</span><strong>-</strong></div>
+          </div>
+          <div class="lp-links" id="session-links"></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script src="/launchpad.js"></script>
+</body>
+</html>

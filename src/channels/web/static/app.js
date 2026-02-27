@@ -21,56 +21,116 @@ let quickSurfaceRefreshTimer = null;
 let settingsPanelVisible = false;
 let recentLogs = [];
 const quickSurfaceState = { logs: false, history: false, usage: false };
+let gatewayRequiresAuth = true;
+let frontdoorModeEnabled = false;
+let appBootstrapped = false;
 
 // --- Auth ---
 
-function authenticate() {
-  token = document.getElementById('token-input').value.trim();
-  if (!token) {
-    document.getElementById('auth-error').textContent = 'Token required';
+function setLaunchpadVisibility(enabled) {
+  const launchpadTabBtn = document.getElementById('launchpad-tab-btn');
+  const launchpadPanel = document.getElementById('tab-launchpad');
+  const launchpadFrame = document.getElementById('frontdoor-embed');
+  const tabButtons = Array.from(document.querySelectorAll('.tab-bar button[data-tab]'));
+  if (!launchpadTabBtn || !launchpadPanel) return;
+
+  for (const button of tabButtons) {
+    const tab = button.getAttribute('data-tab');
+    if (tab !== 'launchpad') {
+      button.classList.toggle('hidden-tab', !!enabled);
+    }
+  }
+
+  launchpadTabBtn.classList.toggle('hidden-tab', !enabled);
+  if (!enabled) {
+    launchpadPanel.classList.remove('active');
+    if (currentTab === 'launchpad') currentTab = 'chat';
+    if (launchpadFrame) launchpadFrame.removeAttribute('src');
     return;
   }
 
-  // Test the token against the health-ish endpoint (chat/threads requires auth)
+  if (launchpadFrame && !launchpadFrame.getAttribute('src')) {
+    launchpadFrame.setAttribute('src', '/frontdoor?embedded=1');
+  }
+}
+
+function startGatewayApp(initialTab) {
+  if (appBootstrapped) return;
+  appBootstrapped = true;
+
+  document.getElementById('auth-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  stripTokenFromUrl();
+
+  if (frontdoorModeEnabled) {
+    initRuntimeInstanceLabel();
+    if (initialTab) switchTab(initialTab);
+    return;
+  }
+
+  connectSSE();
+  connectLogSSE();
+  initRuntimeInstanceLabel();
+  startGatewayStatusPolling();
+  loadThreads();
+  loadMemoryTree();
+  refreshPrivateStorageLink();
+  loadJobs();
+  loadSkills();
+  loadOpsDashboard();
+  startOpsRefresh();
+  startQuickSurfaceRefresh();
+
+  if (initialTab) switchTab(initialTab);
+}
+
+function handleAuthFailure(message) {
+  stopOpsRefresh();
+  stopQuickSurfaceRefresh();
+  appBootstrapped = false;
+  sessionStorage.removeItem('enclagent_token');
+  document.getElementById('auth-screen').style.display = '';
+  document.getElementById('app').style.display = 'none';
+  document.getElementById('auth-error').textContent = message;
+}
+
+function authenticate() {
+  if (gatewayRequiresAuth) {
+    token = document.getElementById('token-input').value.trim();
+    if (!token) {
+      document.getElementById('auth-error').textContent = 'Token required';
+      return;
+    }
+  } else {
+    token = '';
+  }
+
+  // Test request before opening app surfaces.
   apiFetch('/api/chat/threads')
     .then(() => {
-      sessionStorage.setItem('enclagent_token', token);
-      document.getElementById('auth-screen').style.display = 'none';
-      document.getElementById('app').style.display = 'flex';
-      // Strip token from URL so it's not visible in the address bar
-      const cleaned = new URL(window.location);
-      cleaned.searchParams.delete('token');
-      cleaned.hash = '';
-      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
-      connectSSE();
-      connectLogSSE();
-      initRuntimeInstanceLabel();
-      startGatewayStatusPolling();
-      loadThreads();
-      loadMemoryTree();
-      refreshPrivateStorageLink();
-      loadJobs();
-      loadSkills();
-      loadOpsDashboard();
-      startOpsRefresh();
-      startQuickSurfaceRefresh();
+      if (gatewayRequiresAuth) {
+        sessionStorage.setItem('enclagent_token', token);
+      } else {
+        sessionStorage.removeItem('enclagent_token');
+      }
+      const defaultTab = frontdoorModeEnabled ? 'launchpad' : 'chat';
+      startGatewayApp(defaultTab);
     })
     .catch(() => {
-      stopOpsRefresh();
-      stopQuickSurfaceRefresh();
-      sessionStorage.removeItem('enclagent_token');
-      document.getElementById('auth-screen').style.display = '';
-      document.getElementById('app').style.display = 'none';
-      document.getElementById('auth-error').textContent = 'Invalid token';
+      const message = gatewayRequiresAuth ? 'Invalid token' : 'Gateway bootstrap failed';
+      handleAuthFailure(message);
     });
 }
 
-document.getElementById('token-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') authenticate();
-});
+function stripTokenFromUrl() {
+  // Strip token from URL so it's not visible in the address bar.
+  const cleaned = new URL(window.location);
+  cleaned.searchParams.delete('token');
+  cleaned.hash = '';
+  window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
+}
 
-// Auto-authenticate from URL param or saved session
-(function autoAuth() {
+function tryTokenAutoAuth() {
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get('token') || tokenFromHash();
   if (urlToken) {
@@ -87,7 +147,34 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
     document.getElementById('app').style.display = 'flex';
     authenticate();
   }
-})();
+}
+
+function initializeGatewayMode() {
+  fetch('/api/frontdoor/bootstrap')
+    .then((res) => (res.ok ? res.json() : null))
+    .then((bootstrap) => {
+      frontdoorModeEnabled = !!(bootstrap && bootstrap.enabled);
+      gatewayRequiresAuth = !frontdoorModeEnabled;
+      setLaunchpadVisibility(frontdoorModeEnabled);
+      if (frontdoorModeEnabled) {
+        authenticate();
+      } else {
+        tryTokenAutoAuth();
+      }
+    })
+    .catch(() => {
+      frontdoorModeEnabled = false;
+      gatewayRequiresAuth = true;
+      setLaunchpadVisibility(false);
+      tryTokenAutoAuth();
+    });
+}
+
+document.getElementById('token-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') authenticate();
+});
+
+initializeGatewayMode();
 
 function tokenFromHash() {
   const rawHash = String(window.location.hash || '');
@@ -125,7 +212,9 @@ function setSseConnectionState(open) {
 function apiFetch(path, options) {
   const opts = options || {};
   opts.headers = opts.headers || {};
-  opts.headers['Authorization'] = 'Bearer ' + token;
+  if (token) {
+    opts.headers['Authorization'] = 'Bearer ' + token;
+  }
   if (opts.body && typeof opts.body === 'object') {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(opts.body);
@@ -141,7 +230,10 @@ function apiFetch(path, options) {
 function connectSSE() {
   if (eventSource) eventSource.close();
 
-  eventSource = new EventSource('/api/chat/events?token=' + encodeURIComponent(token));
+  const sseUrl = token
+    ? '/api/chat/events?token=' + encodeURIComponent(token)
+    : '/api/chat/events';
+  eventSource = new EventSource(sseUrl);
 
   eventSource.onopen = () => {
     setSseConnectionState(true);
@@ -1576,7 +1668,10 @@ let logBuffer = []; // buffer while paused
 function connectLogSSE() {
   if (logEventSource) logEventSource.close();
 
-  logEventSource = new EventSource('/api/logs/events?token=' + encodeURIComponent(token));
+  const logsUrl = token
+    ? '/api/logs/events?token=' + encodeURIComponent(token)
+    : '/api/logs/events';
+  logEventSource = new EventSource(logsUrl);
 
   logEventSource.addEventListener('log', (e) => {
     const entry = JSON.parse(e.data);

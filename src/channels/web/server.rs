@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State, WebSocketUpgrade},
     http::{StatusCode, header},
     middleware,
     response::{
@@ -231,7 +231,9 @@ pub async fn start_server(
         )
         .route("/api/frontdoor/sessions", get(frontdoor_sessions_handler));
 
-    // Protected routes (require auth)
+    let frontdoor_mode = state.frontdoor.is_some();
+
+    // Protected routes (require auth unless frontdoor mode is enabled)
     let auth_state = AuthState { token: auth_token };
     let protected = Router::new()
         // Chat
@@ -352,16 +354,25 @@ pub async fn start_server(
             "/v1/chat/completions",
             post(super::openai_compat::chat_completions_handler),
         )
-        .route("/v1/models", get(super::openai_compat::models_handler))
-        .route_layer(middleware::from_fn_with_state(
+        .route("/v1/models", get(super::openai_compat::models_handler));
+
+    let protected = if frontdoor_mode {
+        protected
+    } else {
+        protected.route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,
-        ));
+        ))
+    };
 
     // Static file routes (no auth, served from embedded strings)
     let statics = Router::new()
         .route("/", get(index_handler))
-        .route("/gateway", get(gateway_index_handler))
+        .route("/gateway", get(legacy_gateway_redirect_handler))
+        .route("/frontdoor", get(frontdoor_handler))
+        .route("/favicon.ico", get(favicon_handler))
+        .route("/launchpad.css", get(launchpad_css_handler))
+        .route("/launchpad.js", get(launchpad_js_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
         .route("/frontdoor.css", get(frontdoor_css_handler))
@@ -371,11 +382,16 @@ pub async fn start_server(
     let projects = Router::new()
         .route("/projects/{project_id}", get(project_redirect_handler))
         .route("/projects/{project_id}/", get(project_index_handler))
-        .route("/projects/{project_id}/{*path}", get(project_file_handler))
-        .route_layer(middleware::from_fn_with_state(
+        .route("/projects/{project_id}/{*path}", get(project_file_handler));
+
+    let projects = if frontdoor_mode {
+        projects
+    } else {
+        projects.route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,
-        ));
+        ))
+    };
 
     // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
     // origins are allowed, since the gateway is a local-first service.
@@ -429,16 +445,41 @@ pub async fn start_server(
 
 // --- Static file handlers ---
 
-async fn index_handler(State(state): State<Arc<GatewayState>>) -> Html<&'static str> {
-    if state.frontdoor.is_some() {
-        Html(include_str!("static/frontdoor.html"))
-    } else {
-        Html(include_str!("static/index.html"))
-    }
+async fn index_handler() -> Html<&'static str> {
+    Html(include_str!("static/index.html"))
 }
 
-async fn gateway_index_handler() -> Html<&'static str> {
-    Html(include_str!("static/index.html"))
+async fn frontdoor_handler() -> Html<&'static str> {
+    Html(include_str!("static/launchpad.html"))
+}
+
+async fn launchpad_css_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css")],
+        include_str!("static/launchpad.css"),
+    )
+}
+
+async fn launchpad_js_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript")],
+        include_str!("static/launchpad.js"),
+    )
+}
+
+async fn favicon_handler() -> impl IntoResponse {
+    StatusCode::NO_CONTENT
+}
+
+async fn legacy_gateway_redirect_handler(original_uri: OriginalUri) -> impl IntoResponse {
+    let redirect = match original_uri.0.query() {
+        Some(query) if !query.is_empty() => format!("/?{query}"),
+        _ => "/".to_string(),
+    };
+    (
+        StatusCode::TEMPORARY_REDIRECT,
+        [(header::LOCATION, redirect)],
+    )
 }
 
 async fn css_handler() -> impl IntoResponse {
@@ -3887,6 +3928,7 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::Uri;
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {
@@ -3962,5 +4004,21 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_legacy_gateway_redirect_preserves_query() {
+        let uri: Uri = "/gateway?token=demo123".parse().expect("uri");
+        let response = legacy_gateway_redirect_handler(OriginalUri(uri))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .expect("location header")
+            .to_str()
+            .expect("location value");
+        assert_eq!(location, "/?token=demo123");
     }
 }

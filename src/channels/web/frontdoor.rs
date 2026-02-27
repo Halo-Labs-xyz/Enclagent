@@ -94,6 +94,12 @@ enum ProvisioningSource {
     Unconfigured,
 }
 
+#[derive(Debug, Clone)]
+struct ProvisioningDecision {
+    prefer_shared_runtime: bool,
+    reason: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum RuntimeState {
     Running,
@@ -1207,6 +1213,7 @@ impl FrontdoorService {
             chain_id,
             version,
             cfg,
+            onboarding_objective,
             command,
             default_url,
             allow_default_fallback,
@@ -1227,6 +1234,7 @@ impl FrontdoorService {
                 session.chain_id,
                 session.version,
                 cfg,
+                session.onboarding.objective.clone(),
                 self.config.provision_command.clone(),
                 self.config.default_instance_url.clone(),
                 self.config.allow_default_instance_fallback,
@@ -1235,6 +1243,12 @@ impl FrontdoorService {
         };
 
         let normalized_default_url = normalize_default_instance_url(default_url.as_deref());
+        let default_fallback_ready = matches!(&normalized_default_url, Ok(Some(_)));
+        let provisioning_decision = decide_provisioning_decision(
+            onboarding_objective
+                .as_deref()
+                .or(cfg.inference_summary.as_deref()),
+        );
         let command_input = ProvisionCommandInput {
             session_id,
             wallet: &wallet,
@@ -1246,35 +1260,60 @@ impl FrontdoorService {
             config: &cfg,
             verify_base_url: verify_base_url.as_deref(),
         };
-        let (result, provisioning_source) = match command.as_deref().map(str::trim) {
-            Some(raw_template) if !raw_template.is_empty() => {
-                match parse_provision_command_template(raw_template) {
-                    Ok(parsed_template) => (
-                        execute_provision_command(parsed_template.as_str(), &command_input).await,
-                        ProvisioningSource::Command,
-                    ),
-                    Err(_template_err)
-                        if allow_default_fallback && normalized_default_url.is_ok() =>
-                    {
-                        (
-                            provision_from_default_url(&normalized_default_url),
-                            ProvisioningSource::DefaultInstanceUrl,
-                        )
-                    }
-                    Err(template_err) => (
-                        Err(format!("provision_command is malformed: {template_err}")),
-                        ProvisioningSource::Unconfigured,
-                    ),
-                }
-            }
-            _ if allow_default_fallback && normalized_default_url.is_ok() => (
+        let shared_fallback_allowed = allow_default_fallback && default_fallback_ready;
+        let (result, provisioning_source, decision_detail) = if provisioning_decision
+            .prefer_shared_runtime
+            && shared_fallback_allowed
+        {
+            (
                 provision_from_default_url(&normalized_default_url),
                 ProvisioningSource::DefaultInstanceUrl,
-            ),
-            _ => (
-                Err("No valid provisioning command configured. Static fallback is disabled; set GATEWAY_FRONTDOOR_PROVISION_COMMAND or opt in to GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK=1 with GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL.".to_string()),
-                ProvisioningSource::Unconfigured,
-            ),
+                format!(
+                    "{} Using shared fallback runtime instead of spawning a dedicated enclave.",
+                    provisioning_decision.reason
+                ),
+            )
+        } else {
+            let decision_detail = if provisioning_decision.prefer_shared_runtime {
+                format!(
+                    "{} Shared fallback runtime is unavailable; continuing with configured provisioning backend.",
+                    provisioning_decision.reason
+                )
+            } else {
+                provisioning_decision.reason.clone()
+            };
+            let (result, source) = match command.as_deref().map(str::trim) {
+                Some(raw_template) if !raw_template.is_empty() => {
+                    match parse_provision_command_template(raw_template) {
+                        Ok(parsed_template) => (
+                            execute_provision_command(parsed_template.as_str(), &command_input)
+                                .await,
+                            ProvisioningSource::Command,
+                        ),
+                        Err(_template_err)
+                            if allow_default_fallback && normalized_default_url.is_ok() =>
+                        {
+                            (
+                                provision_from_default_url(&normalized_default_url),
+                                ProvisioningSource::DefaultInstanceUrl,
+                            )
+                        }
+                        Err(template_err) => (
+                            Err(format!("provision_command is malformed: {template_err}")),
+                            ProvisioningSource::Unconfigured,
+                        ),
+                    }
+                }
+                _ if allow_default_fallback && normalized_default_url.is_ok() => (
+                    provision_from_default_url(&normalized_default_url),
+                    ProvisioningSource::DefaultInstanceUrl,
+                ),
+                _ => (
+                    Err("No valid provisioning command configured. Static fallback is disabled; set GATEWAY_FRONTDOOR_PROVISION_COMMAND or opt in to GATEWAY_FRONTDOOR_ALLOW_DEFAULT_INSTANCE_FALLBACK=1 with GATEWAY_FRONTDOOR_DEFAULT_INSTANCE_URL.".to_string()),
+                    ProvisioningSource::Unconfigured,
+                ),
+            };
+            (result, source, decision_detail)
         };
 
         let mut state = self.state.write().await;
@@ -1284,6 +1323,13 @@ impl FrontdoorService {
                 return;
             };
             session.provisioning_source = provisioning_source;
+            push_timeline_event(
+                session,
+                "provisioning_decision",
+                session.status.as_str(),
+                &decision_detail,
+                "system",
+            );
 
             match result {
                 Ok(provisioned) => {
@@ -1524,6 +1570,56 @@ fn parse_provision_command_template(template: &str) -> Result<String, String> {
 
 fn is_non_empty_config_value(value: Option<&str>) -> bool {
     value.map(|v| !v.trim().is_empty()).unwrap_or(false)
+}
+
+fn decide_provisioning_decision(objective_hint: Option<&str>) -> ProvisioningDecision {
+    let Some(objective) = objective_hint
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return ProvisioningDecision {
+            prefer_shared_runtime: false,
+            reason:
+                "No explicit objective requested shared runtime; defaulting to dedicated provisioning."
+                    .to_string(),
+        };
+    };
+
+    let lower = objective.to_ascii_lowercase();
+    let shared_runtime_hints = [
+        "shared runtime",
+        "shared gateway",
+        "reuse existing runtime",
+        "reuse existing instance",
+        "no enclave",
+        "without enclave",
+        "skip enclave",
+        "skip provisioning",
+        "dont provision",
+        "don't provision",
+        "dont spin up",
+        "don't spin up",
+        "no spinup",
+        "local only",
+        "dry run",
+        "test only",
+    ];
+
+    if shared_runtime_hints.iter().any(|hint| lower.contains(hint)) {
+        return ProvisioningDecision {
+            prefer_shared_runtime: true,
+            reason: format!(
+                "Objective requests shared runtime semantics ({objective}); dedicated spin-up is optional."
+            ),
+        };
+    }
+
+    ProvisioningDecision {
+        prefer_shared_runtime: false,
+        reason: format!(
+            "Objective implies dedicated runtime isolation ({objective}); dedicated spin-up remains enabled."
+        ),
+    }
 }
 
 fn verification_assurance_level(config: Option<&FrontdoorUserConfig>) -> String {
@@ -4161,6 +4257,115 @@ mod tests {
                 .await
                 .expect("verify and start");
         });
+    }
+
+    #[test]
+    fn intent_can_skip_dedicated_spinup_when_shared_fallback_is_available() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let tmp = tempdir().expect("tempdir");
+            let store_path = tmp.path().join("wallet_sessions.json");
+            let service = FrontdoorService::new_for_tests(
+                FrontdoorConfig {
+                    require_privy: false,
+                    privy_app_id: None,
+                    privy_client_id: None,
+                    provision_command: Some(
+                        "printf 'https://dedicated.example/gateway?token=dedicated\\n'".to_string(),
+                    ),
+                    default_instance_url: Some(
+                        "https://shared.example/gateway?token=shared".to_string(),
+                    ),
+                    allow_default_instance_fallback: true,
+                    verify_app_base_url: None,
+                    session_ttl_secs: 900,
+                    poll_interval_ms: 100,
+                },
+                store_path,
+            );
+
+            let private_key = decode_hex_prefixed(
+                "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            )
+            .expect("private key");
+            let signing_key = SigningKey::from_slice(&private_key).expect("signing key");
+            let wallet =
+                ethereum_address_from_verifying_key(signing_key.verifying_key()).expect("wallet");
+
+            let challenge = service
+                .create_challenge(FrontdoorChallengeRequest {
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    chain_id: Some(1),
+                })
+                .await
+                .expect("challenge");
+            let session_uuid = Uuid::parse_str(&challenge.session_id).expect("session uuid");
+
+            let prehash = eip191_personal_sign_hash(&challenge.message);
+            let (sig, recid) = signing_key
+                .sign_prehash_recoverable(&prehash)
+                .expect("sign challenge");
+            let mut sig_bytes = sig.to_bytes().to_vec();
+            sig_bytes.push(recid.to_byte() + 27);
+            let signature = format!("0x{}", encode_hex_lower(&sig_bytes));
+
+            let mut cfg = sample_user_config(&wallet);
+            cfg.inference_summary =
+                Some("shared runtime only, no enclave spinup; reuse existing instance".to_string());
+            service
+                .clone()
+                .verify_and_start(FrontdoorVerifyRequest {
+                    session_id: challenge.session_id.clone(),
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    privy_identity_token: None,
+                    privy_access_token: None,
+                    message: challenge.message.clone(),
+                    signature,
+                    config: cfg,
+                })
+                .await
+                .expect("verify and start");
+
+            let mut ready = None;
+            for _ in 0..40 {
+                let session = service
+                    .get_session(session_uuid)
+                    .await
+                    .expect("session should exist");
+                if session.status == "ready" {
+                    ready = Some(session);
+                    break;
+                }
+                assert_ne!(session.status, "failed", "session failed unexpectedly");
+                assert_ne!(session.status, "expired", "session expired unexpectedly");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            let ready = ready.expect("session should become ready");
+            assert_eq!(ready.provisioning_source, "default_instance_url");
+            assert_eq!(
+                ready.instance_url.as_deref(),
+                Some("https://shared.example/gateway?token=shared")
+            );
+            assert!(!ready.dedicated_instance);
+        });
+    }
+
+    #[test]
+    fn provisioning_decision_prefers_shared_runtime_for_shared_hints() {
+        let decision = decide_provisioning_decision(Some("No enclave please; shared runtime only"));
+        assert!(decision.prefer_shared_runtime);
+    }
+
+    #[test]
+    fn provisioning_decision_defaults_to_dedicated_when_hint_is_absent() {
+        let decision = decide_provisioning_decision(Some("Launch isolated dedicated enclave"));
+        assert!(!decision.prefer_shared_runtime);
     }
 
     #[test]

@@ -57,7 +57,7 @@ Remove workspaces that point at removed trees. After cleanup, either (a) delete 
 User entry points (REPL, Web Gateway, HTTP Webhook, WASM channels)
     → Enclagent binary (one process)
         → Web gateway (Axum): /api/frontdoor/*, /api/chat/*, /api/memory/*, /api/jobs/*, …
-        → Static UI: /, /gateway, /frontdoor.js, /app.js, frontdoor.html
+        → Static UI: / (canonical), /gateway (legacy redirect), /frontdoor.js, /app.js, frontdoor.html
     → Frontdoor flow (bootstrap → challenge → suggest-config → verify → session)
     → Provisioning (GATEWAY_FRONTDOOR_PROVISION_COMMAND; placeholders via env)
     → Per-user enclave (separate Enclagent instance + config)

@@ -54,6 +54,7 @@ Configure one provisioning path:
 - Current frontdoor UI provides a single Privy connect button with provider chooser semantics (`wallet`, `email`, social OAuth providers) and enforces wallet binding before launch.
 - Wallet connect remains non-SIWE for frontdoor challenge flow: users connect injected EVM wallet, then complete the gateway gasless authorization challenge signature.
 - Email/social entry paths authenticate through Privy (email OTP or OAuth) and must converge on wallet binding before provisioning is allowed.
+- Launchpad now binds signing provider from Privy wallet state first (`useWallets`/`getEthereumProvider`) and only falls back to `window.ethereum` when Privy wallet provider is unavailable.
 - When `privy_app_id` is present, connect flow initializes Privy client before provider execution so identity paths are deterministic.
 - When `GATEWAY_FRONTDOOR_REQUIRE_PRIVY=true`, bootstrap requires resolved `privy_app_id`; launch is blocked if missing.
 - `privy_user_id` is carried as wallet-linked identity metadata and validated on verify when present.
@@ -64,7 +65,9 @@ Configure one provisioning path:
 4. onboarding signature confirmation (`confirm sign`)
 5. challenge signature verification
 6. funding preflight
-7. provisioning
+7. provisioning path decision from objective:
+   - shared-runtime intent can use `default_instance_url` fallback (no dedicated spin-up) when fallback is enabled
+   - otherwise command provisioning runs (dedicated enclave spin-up)
 
 ## Conversational Onboarding Requirements
 
@@ -86,6 +89,15 @@ Configure one provisioning path:
 4. executes `confirm sign`
 - Deterministic module state cards expose dropdown details and pop-out inspection to keep backend contracts and artifact bindings inspectable without leaving launch flow.
 - Blocked launch states expose a deterministic next action hint; failed API actions surface typed failure code + operator hint.
+
+### Chat-First Launchpad UX (Current)
+
+- `/frontdoor` now serves a simplified chat-first launchpad surface.
+- First interaction always enforces identity bootstrap: Privy signup/login + wallet binding.
+- User objective is collected in chat before any provisioning action.
+- Gateway calls `suggest-config` and renders a deterministic configuration summary before launch.
+- Launchpad derives and displays runtime decision (`shared` fallback posture vs `dedicated` enclave posture) before challenge/sign.
+- No instance is provisioned until explicit user confirmation and successful wallet signature.
 
 ## Funding + Dedicated Provisioning Requirements
 
@@ -195,10 +207,12 @@ Public (no gateway token required):
 - `GET /api/frontdoor/session/{session_id}/funding-preflight`
 - `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>` (wallet filter required, `limit` clamped to `1..100`)
 
-Protected (gateway token required):
+Gateway APIs when frontdoor mode is enabled:
 
 - `GET /api/frontdoor/operator/sessions?wallet_address=<0x...>&limit=<n>` (full session payloads)
 - `GET /api/gateway/todos?wallet_address=<0x...>&session_id=<uuid>&limit=<n>` (aggregated TODO feeds)
+
+In frontdoor mode, gateway bearer-token auth is bypassed so users land directly in the main gateway and can complete Privy signup/onboarding without token entry.
 
 Session status/monitor responses include provisioning audit fields:
 
@@ -228,9 +242,13 @@ Generated gateway state should also surface TODO readiness fields:
 - `terminate`
 - `rotate_auth_key`
 
-The root UI (`/`) auto-switches to the frontdoor page when frontdoor mode is enabled.
+The root UI (`/`) is always the main gateway entry.
 
-Legacy gateway UI remains reachable at `/gateway` (token auth still required).
+When frontdoor mode is enabled:
+
+- Launchpad onboarding is integrated as a gateway tab (`Launchpad`) and loaded from `/frontdoor` within the gateway.
+- `/frontdoor` remains available as a standalone route for embedded/legacy access.
+- `/gateway` is a backward-compatible path that redirects to `/`.
 
 ## Railway Signed E2E Gate
 

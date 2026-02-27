@@ -101,6 +101,9 @@ Full local gate:
 - Architecture: `docs/ENCLAGENT_ARCHITECTURE.md`
 - Fork status: `docs/ENCLAGENT_FORK_STATUS.md`
 - Frontdoor flow: `docs/FRONTDOOR_ENCLAVE_FLOW.md`
+- IronClaw enclave swarm orchestration: `docs/IRONCLAW_ENCLAVE_SWARM_ORCHESTRATION.md`
+- ROMA fork integration blueprint: `docs/ROMA_FORK_INTEGRATION_BLUEPRINT.md`
+- Agentic engineering context: `docs/AGENTIC_ENGINEERING_CONTEXT.md`
 - Privy agent wallets + TEE migration: `docs/PRIVY_AGENTIC_WALLETS_AND_TEE_MIGRATION.md`
 - Local verification: `docs/LOCAL_VERIFICATION.md`
 - Channel builds: `docs/BUILDING_CHANNELS.md`

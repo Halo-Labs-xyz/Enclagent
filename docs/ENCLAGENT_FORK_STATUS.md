@@ -28,6 +28,8 @@ Completed platform-direction updates:
 - Wired launch-time onboarding step-4 automation (`confirm plan` + `confirm sign`) before signature verification, including non-secret gateway auth marker handling for transcript safety.
 - Added deterministic next-action remediation and typed failure/operator-hint rendering across frontdoor UI action paths.
 - Added explicit frontdoor rollback playbook for provisioning or verification degradation incidents.
+- Added enclave swarm orchestration runbook for OpenClaw-style multi-agent delivery on IronClaw-lineage instances.
+- Added ROMA fork integration blueprint for optional sidecar decomposition routing into Enclagent job and verification surfaces.
 
 ## Runtime Scope
 

@@ -36,6 +36,7 @@
   <div id="app">
     <!-- Tab Bar -->
     <div class="tab-bar">
+      <button data-tab="launchpad" id="launchpad-tab-btn">Launchpad</button>
       <button class="active" data-tab="chat">Chat</button>
       <button data-tab="skills">Skills</button>
       <button data-tab="ops">Hyperliquid Ops</button>
@@ -57,6 +58,26 @@
           <span id="sse-status">Connected</span>
         </div>
         <div class="gateway-popover" id="gateway-popover"></div>
+      </div>
+    </div>
+
+    <!-- Launchpad Tab -->
+    <div class="tab-panel" id="tab-launchpad">
+      <div class="launchpad-shell">
+        <div class="launchpad-header">
+          <h2>Privy Onboarding and Enclave Launch</h2>
+          <p>
+            Sign up or connect with Privy, describe what you want to do, and the gateway will decide whether to run
+            shared runtime flow or spin up a dedicated enclaved IronClaw instance with guided configuration.
+          </p>
+        </div>
+        <iframe
+          id="frontdoor-embed"
+          class="launchpad-frame"
+          title="Frontdoor Launchpad"
+          loading="lazy"
+          referrerpolicy="same-origin"
+        ></iframe>
       </div>
     </div>
 
