@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
-    body::Body,
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, OriginalUri, Path, Query, State, WebSocketUpgrade},
     http::{HeaderValue, StatusCode, header},
     middleware,
@@ -178,6 +178,8 @@ pub async fn start_server(
                 reason: format!("Failed to get local addr: {}", e),
             })?;
 
+    let auth_state = AuthState { token: auth_token };
+
     // Public routes (no auth)
     let public = Router::new()
         .route("/api/health", get(health_handler))
@@ -224,10 +226,6 @@ pub async fn start_server(
             get(frontdoor_verification_explanation_handler),
         )
         .route(
-            "/api/frontdoor/session/{session_id}/runtime-control",
-            post(frontdoor_runtime_control_handler),
-        )
-        .route(
             "/api/frontdoor/session/{session_id}/gateway-todos",
             get(frontdoor_gateway_todos_handler),
         )
@@ -237,10 +235,22 @@ pub async fn start_server(
         )
         .route("/api/frontdoor/sessions", get(frontdoor_sessions_handler));
 
-    let frontdoor_mode = state.frontdoor.is_some();
+    // Frontdoor operator and control routes are always auth-protected.
+    let frontdoor_operator = Router::new()
+        .route(
+            "/api/frontdoor/session/{session_id}/runtime-control",
+            post(frontdoor_runtime_control_handler),
+        )
+        .route(
+            "/api/frontdoor/operator/sessions",
+            get(frontdoor_operator_sessions_handler),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth_middleware,
+        ));
 
-    // Protected routes (require auth unless frontdoor mode is enabled)
-    let auth_state = AuthState { token: auth_token };
+    // Protected routes (always require auth)
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
@@ -294,10 +304,6 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
-        .route(
-            "/api/frontdoor/operator/sessions",
-            get(frontdoor_operator_sessions_handler),
-        )
         .route("/api/gateway/todos", get(gateway_todos_handler))
         // Skills
         .route("/api/skills", get(skills_list_handler))
@@ -360,16 +366,11 @@ pub async fn start_server(
             "/v1/chat/completions",
             post(super::openai_compat::chat_completions_handler),
         )
-        .route("/v1/models", get(super::openai_compat::models_handler));
-
-    let protected = if frontdoor_mode {
-        protected
-    } else {
-        protected.route_layer(middleware::from_fn_with_state(
+        .route("/v1/models", get(super::openai_compat::models_handler))
+        .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
             auth_middleware,
-        ))
-    };
+        ));
 
     // Static file routes (no auth, served from embedded strings)
     let statics = Router::new()
@@ -392,14 +393,10 @@ pub async fn start_server(
         .route("/projects/{project_id}/", get(project_index_handler))
         .route("/projects/{project_id}/{*path}", get(project_file_handler));
 
-    let projects = if frontdoor_mode {
-        projects
-    } else {
-        projects.route_layer(middleware::from_fn_with_state(
-            auth_state.clone(),
-            auth_middleware,
-        ))
-    };
+    let projects = projects.route_layer(middleware::from_fn_with_state(
+        auth_state.clone(),
+        auth_middleware,
+    ));
 
     // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
     // origins are allowed, since the gateway is a local-first service.
@@ -426,6 +423,7 @@ pub async fn start_server(
 
     let app = Router::new()
         .merge(public)
+        .merge(frontdoor_operator)
         .merge(statics)
         .merge(projects)
         .merge(protected)

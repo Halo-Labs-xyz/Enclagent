@@ -199,6 +199,7 @@ struct ProvisioningSession {
     provisioning_source: ProvisioningSource,
     runtime_state: RuntimeState,
     instance_url: Option<String>,
+    app_url: Option<String>,
     verify_url: Option<String>,
     eigen_app_id: Option<String>,
     signature_verification_latency_ms: Option<u64>,
@@ -471,6 +472,7 @@ impl FrontdoorService {
             provisioning_source: ProvisioningSource::Unknown,
             runtime_state: RuntimeState::Running,
             instance_url: None,
+            app_url: None,
             verify_url: None,
             eigen_app_id: None,
             signature_verification_latency_ms: None,
@@ -543,6 +545,16 @@ impl FrontdoorService {
                 if !expected.is_empty() && !provided.is_empty() && expected != provided {
                     return Err("privy_user_id mismatch".to_string());
                 }
+            }
+
+            // Idempotency guard: once a session leaves awaiting_signature, do not
+            // re-run signature verification/provisioning on repeated verify calls.
+            if !matches!(session.status, SessionStatus::AwaitingSignature) {
+                return Ok(FrontdoorVerifyResponse {
+                    session_id: session_id.to_string(),
+                    status: session.status.as_str().to_string(),
+                    detail: session.detail.clone(),
+                });
             }
 
             if session.expires_at < Utc::now() {
@@ -626,11 +638,44 @@ impl FrontdoorService {
                 "system",
             );
 
+            let command_configured = self
+                .config
+                .provision_command
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false);
+            let default_fallback_ready = self.config.allow_default_instance_fallback
+                && self
+                    .config
+                    .default_instance_url
+                    .as_deref()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false);
+            let provisional_source = if command_configured {
+                ProvisioningSource::Command
+            } else if default_fallback_ready {
+                ProvisioningSource::DefaultInstanceUrl
+            } else {
+                ProvisioningSource::Unconfigured
+            };
+            session.provisioning_source = provisional_source;
+
             session.status = SessionStatus::Provisioning;
             session.updated_at = Utc::now();
             session.error = None;
             session.detail = "Provisioning dedicated enclave...".to_string();
             session.provisioning_started_at = Some(Utc::now());
+            push_timeline_event(
+                session,
+                "provisioning_decision",
+                "provisioning",
+                &format!(
+                    "Provisioning backend selected: {} (dedicated={})",
+                    provisional_source.as_str(),
+                    provisional_source.dedicated_instance()
+                ),
+                "system",
+            );
             push_timeline_event(
                 session,
                 "provisioning_started",
@@ -1366,6 +1411,7 @@ impl FrontdoorService {
                 Ok(provisioned) => {
                     session.status = SessionStatus::Ready;
                     session.instance_url = Some(provisioned.instance_url.clone());
+                    session.app_url = provisioned.app_url.clone();
                     session.verify_url = provisioned.verify_url.clone();
                     session.eigen_app_id = provisioned.eigen_app_id.clone();
                     session.error = None;
@@ -1501,6 +1547,7 @@ fn onboarding_transcript_path(store_path: &std::path::Path, session_id: Uuid) ->
 #[derive(Debug, Clone)]
 struct ProvisioningResult {
     instance_url: String,
+    app_url: Option<String>,
     verify_url: Option<String>,
     eigen_app_id: Option<String>,
 }
@@ -1519,6 +1566,7 @@ fn provision_from_default_url(
     match normalized_default_url {
         Ok(Some(url)) => Ok(ProvisioningResult {
             instance_url: url.clone(),
+            app_url: None,
             verify_url: if looks_like_verify_url(url) {
                 Some(url.clone())
             } else {
@@ -2428,6 +2476,7 @@ fn render_session_response(session: &ProvisioningSession) -> FrontdoorSessionRes
             .map(|c| c.verification_fallback_require_signed_receipts)
             .unwrap_or(false),
         instance_url: session.instance_url.clone(),
+        app_url: session.app_url.clone(),
         verify_url: session.verify_url.clone(),
         eigen_app_id: session.eigen_app_id.clone(),
         error: session.error.clone(),
@@ -2486,6 +2535,7 @@ fn public_session_ref(session: &ProvisioningSession) -> String {
 
 fn session_launched_on_eigencloud(session: &ProvisioningSession) -> Option<bool> {
     if session.instance_url.is_none()
+        && session.app_url.is_none()
         && session.verify_url.is_none()
         && session.eigen_app_id.is_none()
     {
@@ -2502,13 +2552,18 @@ fn session_launched_on_eigencloud(session: &ProvisioningSession) -> Option<bool>
         .as_deref()
         .map(looks_like_eigencloud_url)
         .unwrap_or(false);
+    let from_app_url = session
+        .app_url
+        .as_deref()
+        .map(looks_like_eigencloud_url)
+        .unwrap_or(false);
     let from_instance_url = session
         .instance_url
         .as_deref()
         .map(looks_like_eigencloud_url)
         .unwrap_or(false);
 
-    Some(from_app_id || from_verify_url || from_instance_url)
+    Some(from_app_id || from_verify_url || from_app_url || from_instance_url)
 }
 
 fn looks_like_eigencloud_url(candidate: &str) -> bool {
@@ -2537,8 +2592,13 @@ fn execute_provision_output(
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
         let mut instance_url = v
             .get("instance_url")
-            .or_else(|| v.get("url"))
             .or_else(|| v.get("gateway_url"))
+            .or_else(|| v.get("url"))
+            .and_then(|x| x.as_str())
+            .map(|v| v.to_string());
+        let mut app_url = v
+            .get("app_url")
+            .or_else(|| v.get("eigen_app_console_url"))
             .and_then(|x| x.as_str())
             .map(|v| v.to_string());
         let mut verify_url = v
@@ -2561,12 +2621,30 @@ fn execute_provision_output(
                 verify_url = Some(instance.to_string());
             }
         }
+        let should_infer_app_url = app_url.is_none()
+            && (instance_url.is_none()
+                || instance_url
+                    .as_deref()
+                    .map(looks_like_verify_url)
+                    .unwrap_or(false));
+        if should_infer_app_url {
+            app_url = verify_url
+                .as_deref()
+                .and_then(|url| build_app_url_from_verify_url(url, eigen_app_id.as_deref()));
+        }
+        if let Some(instance) = instance_url.as_deref()
+            && looks_like_verify_url(instance)
+            && app_url.is_some()
+        {
+            instance_url = app_url.clone();
+        }
         if instance_url.is_none() {
-            instance_url = verify_url.clone();
+            instance_url = app_url.clone().or_else(|| verify_url.clone());
         }
         if let Some(instance_url) = instance_url {
             return Some(ProvisioningResult {
                 instance_url,
+                app_url,
                 verify_url,
                 eigen_app_id,
             });
@@ -2583,6 +2661,7 @@ fn execute_provision_output(
             };
             return Some(ProvisioningResult {
                 instance_url: candidate.to_string(),
+                app_url: None,
                 verify_url,
                 eigen_app_id: None,
             });
@@ -2601,12 +2680,38 @@ fn build_verify_app_url(base: Option<&str>, app_id: &str) -> Option<String> {
     Some(format!("{}/{}", base.trim_end_matches('/'), app_id))
 }
 
+fn build_app_url_from_verify_url(verify_url: &str, app_id: Option<&str>) -> Option<String> {
+    let mut url = Url::parse(verify_url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    let rewritten_host = if host == "verify-sepolia.eigencloud.xyz" {
+        "sepolia.eigencloud.xyz".to_string()
+    } else if host == "verify-mainnet.eigencloud.xyz" || host == "verify.eigencloud.xyz" {
+        "mainnet.eigencloud.xyz".to_string()
+    } else if let Some(stripped) = host.strip_prefix("verify-") {
+        stripped.to_string()
+    } else if let Some(stripped) = host.strip_prefix("verify.") {
+        stripped.to_string()
+    } else {
+        return None;
+    };
+    url.set_host(Some(&rewritten_host)).ok()?;
+
+    if let Some(app_id) = app_id.map(str::trim).filter(|v| !v.is_empty()) {
+        url.set_path(&format!("/app/{app_id}"));
+    }
+
+    let rendered = url.to_string();
+    Some(rendered.trim_end_matches('/').to_string())
+}
+
 fn looks_like_verify_url(candidate: &str) -> bool {
     if let Ok(url) = Url::parse(candidate)
         && let Some(host) = url.host_str()
     {
         let host = host.to_ascii_lowercase();
-        return host == "verify-sepolia.eigencloud.xyz" || host == "verify.eigencloud.xyz";
+        return host == "verify-sepolia.eigencloud.xyz"
+            || host == "verify-mainnet.eigencloud.xyz"
+            || host == "verify.eigencloud.xyz";
     }
     false
 }
@@ -2634,6 +2739,8 @@ fn classify_provision_log_source(line: &str) -> &'static str {
     let lower = line.to_ascii_lowercase();
     if lower.contains("railway") {
         "railway"
+    } else if lower.contains("ironclaw") {
+        "ironclaw"
     } else if lower.contains("ecloud")
         || lower.contains("eigencloud")
         || lower.contains("eigenda")
@@ -2836,7 +2943,11 @@ fn build_provision_command(
 
     let mut cmd = template.to_string();
     for (placeholder, env_key, _) in &replacements {
-        cmd = cmd.replace(placeholder, &format!("${{{env_key}}}"));
+        let env_ref = format!("${{{env_key}}}");
+        let quoted_env_ref = format!("\"${{{env_key}}}\"");
+        cmd = cmd.replace(&format!("'{}'", placeholder), &quoted_env_ref);
+        cmd = cmd.replace(&format!("\"{}\"", placeholder), &quoted_env_ref);
+        cmd = cmd.replace(placeholder, &env_ref);
     }
 
     let mut command = Command::new("/bin/sh");
@@ -2863,12 +2974,22 @@ where
         .spawn()
         .map_err(|e| format!("failed to execute provision command: {e}"))?;
 
-    let mut stdout_lines = child.stdout.take().map(|stream| BufReader::new(stream).lines());
-    let mut stderr_lines = child.stderr.take().map(|stream| BufReader::new(stream).lines());
+    let mut stdout_lines = child
+        .stdout
+        .take()
+        .map(|stream| BufReader::new(stream).lines());
+    let mut stderr_lines = child
+        .stderr
+        .take()
+        .map(|stream| BufReader::new(stream).lines());
     let mut stdout_complete = stdout_lines.is_none();
     let mut stderr_complete = stderr_lines.is_none();
     let mut stdout = String::new();
     let mut stderr = String::new();
+    let started_at = Instant::now();
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(20));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat.tick().await;
 
     while !(stdout_complete && stderr_complete) {
         tokio::select! {
@@ -2937,6 +3058,17 @@ where
                         stderr_complete = true;
                     }
                 }
+            }
+            _ = heartbeat.tick() => {
+                let elapsed_secs = started_at.elapsed().as_secs();
+                on_log(ProvisionCommandLog {
+                    source: "ecloud".to_string(),
+                    stream: "heartbeat".to_string(),
+                    line: format!(
+                        "EigenCloud build + IronClaw runtime provisioning in progress ({}s elapsed)",
+                        elapsed_secs
+                    ),
+                }).await;
             }
         }
     }
@@ -3551,6 +3683,15 @@ fn apply_intent_overrides(
     let lower = trimmed_intent.to_ascii_lowercase();
     config.inference_summary = Some(trimmed_intent.to_string());
     config.inference_confidence = Some(0.68);
+    if config.profile_name.trim().is_empty()
+        || config
+            .profile_name
+            .trim()
+            .eq_ignore_ascii_case("launchpad_profile")
+    {
+        config.profile_name = derive_profile_name_from_intent(trimmed_intent, connected_wallet);
+        assumptions.push("Generated profile_name from intent and connected wallet.".to_string());
+    }
 
     if contains_any_lower(
         &lower,
@@ -3733,6 +3874,66 @@ fn infer_symbols_from_intent(intent: &str) -> Vec<String> {
     symbols
 }
 
+fn derive_profile_name_from_intent(intent: &str, connected_wallet: &str) -> String {
+    const PROFILE_NAME_STOP_WORDS: &[&str] = &[
+        "with",
+        "that",
+        "this",
+        "from",
+        "into",
+        "your",
+        "user",
+        "launch",
+        "agent",
+        "session",
+        "profile",
+        "and",
+        "for",
+        "the",
+    ];
+
+    let wallet_hex = connected_wallet
+        .trim()
+        .trim_start_matches("0x")
+        .to_ascii_lowercase();
+    let wallet_tail = if wallet_hex.len() >= 6 {
+        &wallet_hex[wallet_hex.len() - 6..]
+    } else {
+        "wallet"
+    };
+
+    let mut parts = Vec::new();
+    for token in intent.split(|c: char| !c.is_ascii_alphanumeric()) {
+        let normalized = token.trim().to_ascii_lowercase();
+        if normalized.len() < 3 {
+            continue;
+        }
+        if PROFILE_NAME_STOP_WORDS.contains(&normalized.as_str()) {
+            continue;
+        }
+        if !parts.iter().any(|part: &String| part == &normalized) {
+            parts.push(normalized);
+        }
+        if parts.len() >= 4 {
+            break;
+        }
+    }
+
+    if parts.is_empty() {
+        parts.push("enclagent".to_string());
+    }
+
+    let mut candidate = format!("{}-{}", parts.join("-"), wallet_tail);
+    if candidate.len() > 64 {
+        candidate = candidate.chars().take(64).collect();
+        candidate = candidate.trim_end_matches('-').to_string();
+    }
+    if candidate.trim().is_empty() {
+        return format!("enclagent-{}", wallet_tail);
+    }
+    candidate
+}
+
 fn contains_any_lower(haystack: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|needle| haystack.contains(needle))
 }
@@ -3757,8 +3958,15 @@ fn normalize_suggested_config(
 
     let hyperliquid_profile = config.profile_domain == "hyperliquid";
 
-    if config.profile_name.trim().is_empty() {
-        config.profile_name = "launchpad_profile".to_string();
+    if config.profile_name.trim().is_empty()
+        || config
+            .profile_name
+            .trim()
+            .eq_ignore_ascii_case("launchpad_profile")
+    {
+        let seed = config.inference_summary.as_deref().unwrap_or("enclagent session");
+        config.profile_name = derive_profile_name_from_intent(seed, connected_wallet);
+        assumptions.push("Generated profile_name from intent and connected wallet.".to_string());
     }
     if config.profile_name.len() > 64 {
         config.profile_name = config.profile_name.chars().take(64).collect();
@@ -4343,6 +4551,131 @@ mod tests {
     }
 
     #[test]
+    fn frontdoor_verify_is_idempotent_after_ready() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let tmp = tempdir().expect("tempdir");
+            let store_path = tmp.path().join("wallet_sessions.json");
+            let service = FrontdoorService::new_for_tests(
+                FrontdoorConfig {
+                    require_privy: false,
+                    privy_app_id: None,
+                    privy_client_id: None,
+                    provision_command: None,
+                    default_instance_url: Some(
+                        "https://session.example/gateway?token=demo".to_string(),
+                    ),
+                    allow_default_instance_fallback: true,
+                    verify_app_base_url: Some(
+                        "https://verify-sepolia.eigencloud.xyz/app".to_string(),
+                    ),
+                    session_ttl_secs: 900,
+                    poll_interval_ms: 100,
+                },
+                store_path,
+            );
+
+            let private_key = decode_hex_prefixed(
+                "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+            )
+            .expect("private key");
+            let signing_key = SigningKey::from_slice(&private_key).expect("signing key");
+            let wallet =
+                ethereum_address_from_verifying_key(signing_key.verifying_key()).expect("wallet");
+
+            let challenge = service
+                .create_challenge(FrontdoorChallengeRequest {
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    chain_id: Some(1),
+                })
+                .await
+                .expect("challenge");
+            let session_uuid = Uuid::parse_str(&challenge.session_id).expect("session uuid");
+
+            let prehash = eip191_personal_sign_hash(&challenge.message);
+            let (sig, recid) = signing_key
+                .sign_prehash_recoverable(&prehash)
+                .expect("sign challenge");
+            let mut sig_bytes = sig.to_bytes().to_vec();
+            sig_bytes.push(recid.to_byte() + 27);
+            let signature = format!("0x{}", encode_hex_lower(&sig_bytes));
+
+            let verify_response = service
+                .clone()
+                .verify_and_start(FrontdoorVerifyRequest {
+                    session_id: challenge.session_id.clone(),
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    privy_identity_token: None,
+                    privy_access_token: None,
+                    message: challenge.message.clone(),
+                    signature: signature.clone(),
+                    config: sample_user_config(&wallet),
+                })
+                .await
+                .expect("first verify and start");
+            assert_eq!(verify_response.status, "provisioning");
+
+            for _ in 0..40 {
+                let session = service
+                    .get_session(session_uuid)
+                    .await
+                    .expect("session should exist");
+                if session.status == "ready" {
+                    break;
+                }
+                assert_ne!(session.status, "failed", "session failed unexpectedly");
+                assert_ne!(session.status, "expired", "session expired unexpectedly");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+
+            let timeline_before = service
+                .session_timeline(session_uuid)
+                .await
+                .expect("timeline before replay");
+            let provisioning_started_before = timeline_before
+                .events
+                .iter()
+                .filter(|event| event.event_type == "provisioning_started")
+                .count();
+            assert_eq!(provisioning_started_before, 1);
+
+            let replay_response = service
+                .clone()
+                .verify_and_start(FrontdoorVerifyRequest {
+                    session_id: challenge.session_id,
+                    wallet_address: wallet.clone(),
+                    privy_user_id: None,
+                    privy_identity_token: None,
+                    privy_access_token: None,
+                    message: challenge.message,
+                    signature,
+                    config: sample_user_config(&wallet),
+                })
+                .await
+                .expect("replay verify should be idempotent");
+            assert_eq!(replay_response.status, "ready");
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+
+            let timeline_after = service
+                .session_timeline(session_uuid)
+                .await
+                .expect("timeline after replay");
+            let provisioning_started_after = timeline_after
+                .events
+                .iter()
+                .filter(|event| event.event_type == "provisioning_started")
+                .count();
+            assert_eq!(provisioning_started_after, 1);
+        });
+    }
+
+    #[test]
     fn frontdoor_privy_mode_accepts_wallet_signature_without_siwe_tokens() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4535,11 +4868,94 @@ mod tests {
             Some("https://verify-sepolia.eigencloud.xyz/app/0xabc")
         );
         assert_eq!(result.eigen_app_id.as_deref(), Some("0xabc"));
+        assert!(result.app_url.is_none());
+
+        let json_with_app_only =
+            r#"{"app_url":"https://sepolia.eigencloud.xyz/app/0xdef","app_id":"0xdef"}"#;
+        let result = execute_provision_output(
+            json_with_app_only,
+            Some("https://verify-sepolia.eigencloud.xyz/app"),
+        )
+        .expect("json output with app url");
+        assert_eq!(
+            result.instance_url,
+            "https://sepolia.eigencloud.xyz/app/0xdef"
+        );
+        assert_eq!(
+            result.app_url.as_deref(),
+            Some("https://sepolia.eigencloud.xyz/app/0xdef")
+        );
+        assert_eq!(
+            result.verify_url.as_deref(),
+            Some("https://verify-sepolia.eigencloud.xyz/app/0xdef")
+        );
+        assert_eq!(result.eigen_app_id.as_deref(), Some("0xdef"));
 
         let plain = "line1\nhttps://foo.example/path\n";
         let result = execute_provision_output(plain, None).expect("plain url");
         assert_eq!(result.instance_url, "https://foo.example/path");
+        assert!(result.app_url.is_none());
         assert!(result.verify_url.is_none());
+
+        let verify_only = r#"{"instance_url":"https://verify-sepolia.eigencloud.xyz/app/0x1234","verify_url":"https://verify-sepolia.eigencloud.xyz/app/0x1234","app_id":"0x1234"}"#;
+        let result = execute_provision_output(verify_only, None).expect("verify-only output");
+        assert_eq!(
+            result.instance_url,
+            "https://sepolia.eigencloud.xyz/app/0x1234"
+        );
+        assert_eq!(
+            result.app_url.as_deref(),
+            Some("https://sepolia.eigencloud.xyz/app/0x1234")
+        );
+        assert_eq!(
+            result.verify_url.as_deref(),
+            Some("https://verify-sepolia.eigencloud.xyz/app/0x1234")
+        );
+    }
+
+    #[test]
+    fn build_provision_command_expands_single_quoted_placeholders() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        rt.block_on(async {
+            let wallet = "0xe10e3def5348cb4151a8b99beebfd43646bade59".to_string();
+            let config = sample_user_config(&wallet);
+            let session_id = Uuid::new_v4();
+            let input = ProvisionCommandInput {
+                session_id,
+                wallet: &wallet,
+                privy_user_id: None,
+                privy_identity_token: None,
+                privy_access_token: None,
+                chain_id: 1,
+                version: 1,
+                config: &config,
+                verify_base_url: Some("https://verify-sepolia.eigencloud.xyz/app"),
+            };
+
+            let mut command = build_provision_command(
+                "printf '%s|%s|%s' '{wallet_address}' '{session_id}' '{config_b64}'",
+                &input,
+            )
+            .expect("command");
+            let output = command.output().await.expect("command output");
+            assert!(output.status.success());
+            let stdout = String::from_utf8(output.stdout).expect("stdout utf8");
+            let parts: Vec<&str> = stdout.trim().split('|').collect();
+            assert_eq!(parts.len(), 3);
+            assert_eq!(parts[0], wallet);
+            assert_eq!(parts[1], session_id.to_string());
+
+            let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(parts[2])
+                .expect("decode config_b64");
+            let decoded_cfg: FrontdoorUserConfig =
+                serde_json::from_slice(&decoded).expect("decoded config json");
+            assert_eq!(decoded_cfg.profile_name, config.profile_name);
+            assert_eq!(decoded_cfg.gateway_auth_key, config.gateway_auth_key);
+        });
     }
 
     #[test]
@@ -4575,6 +4991,8 @@ mod tests {
         assert_eq!(suggested.config.paper_live_policy, "paper_only");
         assert_eq!(suggested.config.symbol_allowlist, vec!["BTC".to_string()]);
         assert_eq!(suggested.config.information_sharing_scope, "full_audit");
+        assert_ne!(suggested.config.profile_name, "launchpad_profile");
+        assert!(suggested.config.profile_name.contains("btc"));
     }
 
     #[test]
@@ -5255,6 +5673,7 @@ mod tests {
             let public_obj = public_json.as_object().expect("public object");
             assert!(!public_obj.contains_key("session_id"));
             assert!(!public_obj.contains_key("instance_url"));
+            assert!(!public_obj.contains_key("app_url"));
             assert!(!public_obj.contains_key("verify_url"));
             assert!(!public_obj.contains_key("eigen_app_id"));
             assert!(!public_obj.contains_key("error"));

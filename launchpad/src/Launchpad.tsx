@@ -65,6 +65,7 @@ interface Session {
   provisioning_source?: string;
   runtime_state?: string;
   instance_url?: string;
+  app_url?: string;
   verify_url?: string;
   error?: string;
   detail?: string;
@@ -182,14 +183,62 @@ function getEthereumEmbeddedAddress(user: unknown): string {
 }
 
 function extractWalletFromUser(user: unknown): string {
-  const u = user as { linkedAccounts?: Array<{ address?: string }>; linked_accounts?: Array<{ address?: string }>; accounts?: Array<{ address?: string }>; wallet?: { address?: string }; wallet_address?: string } | null;
+  const u = user as {
+    linkedAccounts?: Array<{
+      type?: string;
+      address?: string;
+      chainType?: string;
+      chain_type?: string;
+      walletClientType?: string;
+      wallet_client_type?: string;
+    }>;
+    linked_accounts?: Array<{
+      type?: string;
+      address?: string;
+      chainType?: string;
+      chain_type?: string;
+      walletClientType?: string;
+      wallet_client_type?: string;
+    }>;
+    accounts?: Array<{ address?: string }>;
+    wallet?: { address?: string };
+    wallet_address?: string;
+  } | null;
   if (!u) return "";
+  const linked = u.linkedAccounts || u.linked_accounts || [];
+  let externalWallet = "";
+  let anyLinkedWallet = "";
+  for (const acc of linked) {
+    const rawType = String((acc as { type?: string }).type || "").trim().toLowerCase();
+    if (rawType && rawType !== "wallet") continue;
+    const rawChainType = String(
+      (acc as { chainType?: string; chain_type?: string }).chainType ||
+        (acc as { chainType?: string; chain_type?: string }).chain_type ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+    if (rawChainType && rawChainType !== "ethereum") continue;
+    const walletAddress = normalizeWallet(String(acc?.address || ""));
+    if (!walletAddress) continue;
+    if (!anyLinkedWallet) {
+      anyLinkedWallet = walletAddress;
+    }
+    const rawClientType = String(
+      (acc as { walletClientType?: string; wallet_client_type?: string }).walletClientType ||
+        (acc as { walletClientType?: string; wallet_client_type?: string }).wallet_client_type ||
+        ""
+    )
+      .trim()
+      .toLowerCase();
+    if (rawClientType !== "privy" && !externalWallet) {
+      externalWallet = walletAddress;
+    }
+  }
+  if (externalWallet) return externalWallet;
+  if (anyLinkedWallet) return anyLinkedWallet;
   const embedded = getEthereumEmbeddedAddress(u);
   if (embedded) return embedded;
-  const linked = u.linkedAccounts || u.linked_accounts || [];
-  for (const acc of linked) {
-    if (acc?.address && /^0x[a-fA-F0-9]{40}$/.test(String(acc.address))) return String(acc.address).trim();
-  }
   if (u.wallet?.address && /^0x[a-fA-F0-9]{40}$/.test(String(u.wallet.address))) return String(u.wallet.address).trim();
   if (u.wallet_address && /^0x[a-fA-F0-9]{40}$/.test(String(u.wallet_address))) return String(u.wallet_address).trim();
   return "";
@@ -222,6 +271,36 @@ function renderEnvironment(): string {
   if (!host || host === "localhost" || host === "127.0.0.1") return "Local";
   if (/stage|staging|-stg/.test(host)) return "Staging";
   return "Production";
+}
+
+function statusTone(value: unknown): "positive" | "warning" | "negative" | "neutral" {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "neutral";
+  if (
+    normalized.includes("ready") ||
+    normalized.includes("running") ||
+    normalized.includes("active") ||
+    normalized.includes("healthy")
+  ) {
+    return "positive";
+  }
+  if (
+    normalized.includes("error") ||
+    normalized.includes("failed") ||
+    normalized.includes("denied") ||
+    normalized.includes("cancel")
+  ) {
+    return "negative";
+  }
+  if (
+    normalized.includes("launch") ||
+    normalized.includes("provision") ||
+    normalized.includes("pending") ||
+    normalized.includes("starting")
+  ) {
+    return "warning";
+  }
+  return "neutral";
 }
 
 function logLevelFromTimelineEvent(event: FrontdoorTimelineEvent): "info" | "success" | "error" {
@@ -260,6 +339,25 @@ function formatTerminalTime(value: string): string {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return "--:--:--";
   return d.toLocaleTimeString([], { hour12: false });
+}
+
+function sanitizeRuntimeUrl(value: unknown): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    if (url.origin === window.location.origin) {
+      const currentPath = window.location.pathname.replace(/\/+$/, "") || "/";
+      const targetPath = url.pathname.replace(/\/+$/, "") || "/";
+      if (targetPath === currentPath || targetPath === "/frontdoor") {
+        return "";
+      }
+    }
+    return url.toString();
+  } catch (_) {
+    return "";
+  }
 }
 
 function applyBlueprintSeedToConfig(config: Config, blueprint: LaunchpadBlueprint): Config {
@@ -403,7 +501,7 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
   const user = privy?.user ?? null;
   const ready = !!privy?.ready;
   const authenticated = !!user;
-  const [hoveredSignInMethod, setHoveredSignInMethod] = useState<SignInMethod | null>(null);
+  const [authIntent, setAuthIntent] = useState<"wallet" | "email" | null>(null);
 
   const ethereumEmbeddedAddress = useMemo(() => (user ? getEthereumEmbeddedAddress(user) : ""), [user]);
 
@@ -428,21 +526,25 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
       const candidates = (wallets as PrivyWalletLike[]).filter((wallet) => {
         const chainType = String(wallet.chainType || wallet.chain_type || "").trim().toLowerCase();
         if (chainType && chainType !== "ethereum") return false;
-        const client = String(wallet.walletClientType || wallet.wallet_client_type || "").trim().toLowerCase();
-        if (client === "privy") return true;
-        if (client) return false;
-        const walletAddr = normalizeWallet(String(wallet.address || ""));
-        return !!embedded && walletAddr === embedded;
+        if (typeof wallet.getEthereumProvider !== "function") return false;
+        return true;
       });
       const ordered = [...candidates];
-      if (preferred) {
-        ordered.sort((a, b) => {
-          const aMatch = normalizeWallet(String(a.address || "")) === preferred;
-          const bMatch = normalizeWallet(String(b.address || "")) === preferred;
-          if (aMatch === bMatch) return 0;
-          return aMatch ? -1 : 1;
-        });
-      }
+      ordered.sort((a, b) => {
+        const addrA = normalizeWallet(String(a.address || ""));
+        const addrB = normalizeWallet(String(b.address || ""));
+        const clientA = String(a.walletClientType || a.wallet_client_type || "").trim().toLowerCase();
+        const clientB = String(b.walletClientType || b.wallet_client_type || "").trim().toLowerCase();
+        const score = (addr: string, client: string): number => {
+          let value = 0;
+          if (preferred && addr === preferred) value += 1000;
+          if (client && client !== "privy") value += 100;
+          if (embedded && addr === embedded) value += 10;
+          if (client === "privy") value += 1;
+          return value;
+        };
+        return score(addrB, clientB) - score(addrA, clientA);
+      });
       for (const wallet of ordered) {
         if (typeof wallet.getEthereumProvider !== "function") continue;
         try {
@@ -501,6 +603,7 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
       });
     },
     onError: (err: unknown) => {
+      setAuthIntent(null);
       const msg = String((err as { message?: string })?.message ?? err);
       if (msg.includes("exited_auth_flow") || msg.includes("user_cancelled")) return;
       addMessage("error", "Privy login failed: " + msg);
@@ -526,7 +629,7 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
     redirectAttempted: false,
   });
 
-  const walletAddress = ethereumEmbeddedAddress || extractWalletFromUser(user) || state.walletAddress;
+  const walletAddress = state.walletAddress || extractWalletFromUser(user) || ethereumEmbeddedAddress;
   const effectiveWalletAddress = normalizeWallet(walletAddress);
 
   const [steps, setSteps] = useState<Record<StepId, StepState>>(() => ({
@@ -674,16 +777,14 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
         clearPolling();
         setState((prev) => ({ ...prev, phase: "ready" }));
         setStepState("provisioning", "done", "Instance ready.");
+        const runtimeUrl = sanitizeRuntimeUrl(s.instance_url || s.app_url);
+        const verifyUrl = sanitizeRuntimeUrl(s.verify_url);
         addMessage("assistant", "Your enclave is ready. Use the session links to open the runtime and verification surface.");
-        const targetUrl = s.instance_url || s.verify_url || "";
-        if (targetUrl && !redirectAttemptedRef.current) {
-          redirectAttemptedRef.current = true;
-          setState((prev) => (prev.redirectAttempted ? prev : { ...prev, redirectAttempted: true }));
-          addMessage("system", "Session ready. Redirecting to runtime...");
-          if (window.parent !== window) {
-            window.parent.postMessage({ source: "enclagent:launchpad", type: "session_ready_redirect", url: targetUrl, session_id: s.session_id || "" }, window.location.origin);
-          }
-          setTimeout(() => window.location.assign(targetUrl), 200);
+        if (!runtimeUrl && !verifyUrl) {
+          addMessage(
+            "system",
+            "Provisioning completed without a dedicated runtime URL. Staying on terminal view."
+          );
         }
         setComposerEnabled(false);
         setChatAction(null);
@@ -876,7 +977,10 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
 
   useEffect(() => {
     if (!ready || !authenticated || !user) return;
-    if (normalizeWallet(ethereumEmbeddedAddress)) return;
+    const linkedWallet = normalizeWallet(
+      stateRef.current.walletAddress || extractWalletFromUser(user) || ethereumEmbeddedAddress
+    );
+    if (linkedWallet) return;
     const provisionKey = extractPrivyUserId(user, "") || String((user as { id?: string }).id || "").trim();
     if (!provisionKey || walletProvisionKeyRef.current === provisionKey) return;
     walletProvisionKeyRef.current = provisionKey;
@@ -1026,7 +1130,9 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
 
   const normalizeConfig = (c: Record<string, unknown>, wallet: string, gatewayAuthKey: string): Config => {
     const out = { ...c } as Config;
-    out.profile_name = (out.profile_name as string) || "ironclaw_profile_" + Date.now();
+    out.profile_name =
+      (out.profile_name as string) ||
+      `enclagent-profile-${(normalizeWallet(wallet).replace(/^0x/, "").slice(-6) || "user")}`;
     out.profile_domain = (out.profile_domain as string) || "general";
     out.custody_mode = (out.custody_mode as string) || "user_wallet";
     out.verification_backend = (out.verification_backend as string) || "eigencloud_primary";
@@ -1226,10 +1332,60 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
 
   const showIdentityButton = !authenticated || !effectiveWalletAddress;
   const canStartIdentity = hasPrivy && ready;
-  const isTerminalPhase = state.phase === "launching" || state.phase === "provisioning";
+  const showAuthOverlay = showIdentityButton;
+  const safeInstanceUrl = useMemo(
+    () => sanitizeRuntimeUrl(session.instance_url || session.app_url),
+    [session.instance_url, session.app_url]
+  );
+  const safeVerifyUrl = useMemo(
+    () => sanitizeRuntimeUrl(session.verify_url),
+    [session.verify_url]
+  );
+  const runtimeTone = statusTone(session.runtime_state);
+  const sessionTone = statusTone(session.status || state.latestSessionStatus);
+  const isTerminalPhase =
+    state.phase === "launching" || state.phase === "provisioning" || state.phase === "ready";
   const activeSignInMethod = useMemo(() => detectSignInMethod(user), [user]);
-  const selectedSignInMethod = hoveredSignInMethod || activeSignInMethod || "wallet";
-  const selectedSignInMethodInfo = SIGN_IN_METHODS[selectedSignInMethod];
+  const activeSignInMethodInfo = activeSignInMethod ? SIGN_IN_METHODS[activeSignInMethod] : null;
+  const gatewayLinks = useMemo(
+    () =>
+      [
+        {
+          key: "runtime",
+          title: "Runtime Gateway",
+          detail: "Primary endpoint for live agent runtime traffic.",
+          url: safeInstanceUrl,
+        },
+        {
+          key: "verify",
+          title: "Verification Gateway",
+          detail: "Audit and verification surface for receipts and proofs.",
+          url: safeVerifyUrl,
+        },
+      ].filter((gateway) => !!gateway.url),
+    [safeInstanceUrl, safeVerifyUrl]
+  );
+
+  const startIdentityLogin = useCallback(
+    (method: "wallet" | "email") => {
+      if (!canStartIdentity) {
+        addMessageIfNew("system", "Privy is still initializing. Retry in a moment.");
+        return;
+      }
+      setAuthIntent(method);
+      void Promise.resolve(login({ loginMethods: [method] })).catch((err) => {
+        setAuthIntent(null);
+        addMessage("error", "Unable to open sign-in flow: " + String((err as Error)?.message || err));
+      });
+    },
+    [addMessage, addMessageIfNew, canStartIdentity, login]
+  );
+
+  useEffect(() => {
+    if (authenticated) {
+      setAuthIntent(null);
+    }
+  }, [authenticated]);
 
   return (
     <>
@@ -1243,76 +1399,76 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
         </div>
         <div className="lp-header-right">
           <div className="lp-environment">{renderEnvironment()}</div>
-          <div
-            className={`lp-auth-popover ${showIdentityButton ? "" : "is-authenticated"}`}
-            onMouseLeave={() => setHoveredSignInMethod(null)}
-          >
-            {showIdentityButton ? (
-              <button
-                type="button"
-                className="lp-action-btn lp-auth-btn"
-                onClick={() => {
-                  if (!canStartIdentity) {
-                    addMessageIfNew(
-                      "system",
-                      "Privy is still initializing. Retry in a moment."
-                    );
-                    return;
-                  }
-                  login();
-                }}
-                disabled={!hasPrivy}
-              >
-                {canStartIdentity ? "Sign Up / Connect Wallet" : "Initializing Privy..."}
-              </button>
-            ) : (
-              <button type="button" className="lp-action-btn lp-auth-btn" onClick={handleLogout}>
-                Logout
-              </button>
-            )}
-            {showIdentityButton && (
-              <div className="lp-auth-hovercard">
-                <p className="lp-auth-hovercard-title">Privy Embedded Sign-In</p>
-                <p className="lp-auth-hovercard-subtitle">
-                  Hover a method to inspect how identity and wallet setup will run.
-                </p>
-                <div className="lp-auth-method-list" role="list">
-                  {(Object.keys(SIGN_IN_METHODS) as SignInMethod[]).map((method) => {
-                    const methodInfo = SIGN_IN_METHODS[method];
-                    const isActive = method === selectedSignInMethod;
-                    return (
-                      <button
-                        key={method}
-                        type="button"
-                        className={`lp-auth-method-chip ${isActive ? "is-active" : ""}`}
-                        onMouseEnter={() => setHoveredSignInMethod(method)}
-                        onFocus={() => setHoveredSignInMethod(method)}
-                        aria-pressed={isActive}
-                      >
-                        {methodInfo.label}
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="lp-auth-method-detail">
-                  <p className="lp-auth-method-title">{selectedSignInMethodInfo.title}</p>
-                  <p className="lp-auth-method-summary">{selectedSignInMethodInfo.summary}</p>
-                  <ul className="lp-auth-method-points">
-                    {selectedSignInMethodInfo.details.map((detail, idx) => (
-                      <li key={`${selectedSignInMethod}-${idx}`}>{detail}</li>
-                    ))}
-                  </ul>
-                  {activeSignInMethod && (
-                    <p className="lp-auth-method-detected">
-                      Active account method: {SIGN_IN_METHODS[activeSignInMethod].label}
-                    </p>
-                  )}
-                </div>
+          {authenticated && (
+            <button
+              type="button"
+              className="lp-door-logout-btn"
+              onClick={handleLogout}
+              aria-label="Logout and exit"
+              title="Logout"
+            >
+              <span className="lp-door-icon" aria-hidden="true" />
+              <span>Exit</span>
+            </button>
+          )}
+        </div>
+      </header>
+      {showAuthOverlay && (
+        <div className="lp-auth-screen" role="dialog" aria-modal="true" aria-label="Enclagent sign up">
+          <div className="lp-auth-screen-panel lp-auth-wallet-panel">
+            <p className="lp-auth-panel-eyebrow">Identity Overlay</p>
+            <h2>Wallet And Session</h2>
+            <p className="lp-auth-panel-subtitle">
+              Secure identity setup runs in-place over launchpad. Choose email or wallet to continue.
+            </p>
+            <div className="lp-kv">
+              <div className="lp-kv-row"><span>Identity</span><strong>{authenticated ? "Connected" : "Pending"}</strong></div>
+              <div className="lp-kv-row"><span>Wallet</span><strong>{effectiveWalletAddress || "Not connected"}</strong></div>
+              <div className="lp-kv-row"><span>Chain</span><strong>{state.chainId || "Auto"}</strong></div>
+              <div className="lp-kv-row"><span>Session</span><strong>{state.sessionId || "Not started"}</strong></div>
+              <div className="lp-kv-row"><span>Custody</span><strong>{configSummary.custody_mode || "user_wallet"}</strong></div>
+            </div>
+            {activeSignInMethodInfo && (
+              <div className="lp-auth-method-detail">
+                <p className="lp-auth-method-title">Detected Method: {activeSignInMethodInfo.label}</p>
+                <p className="lp-auth-method-summary">{activeSignInMethodInfo.summary}</p>
+                <ul className="lp-auth-method-points">
+                  {activeSignInMethodInfo.details.map((detail, idx) => (
+                    <li key={`detected-method-${idx}`}>{detail}</li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>
+          <div className="lp-auth-screen-panel lp-auth-cta-panel">
+            <p className="lp-auth-panel-eyebrow">Enclagent</p>
+            <h2>Sign In To Unlock</h2>
+            <p className="lp-auth-panel-subtitle">
+              Real-time launch orchestration, verifiable signatures, and enclaved runtime provisioning.
+            </p>
+            <button
+              type="button"
+              className="lp-auth-cta-btn is-primary"
+              onClick={() => startIdentityLogin("email")}
+              disabled={!canStartIdentity}
+            >
+              {authIntent === "email" ? "Opening Email Sign-In..." : "Continue With Email"}
+            </button>
+            <p className="lp-auth-or">OR</p>
+            <button
+              type="button"
+              className="lp-auth-cta-btn"
+              onClick={() => startIdentityLogin("wallet")}
+              disabled={!canStartIdentity}
+            >
+              {authIntent === "wallet" ? "Opening Wallet Sign-In..." : "Continue With Wallet"}
+            </button>
+            <p className="lp-auth-legal">
+              By continuing, you agree to secure enclave provisioning and wallet-authenticated session policy.
+            </p>
+          </div>
         </div>
-      </header>
+      )}
       <section className="lp-grid">
         {isTerminalPhase ? (
           <article className="lp-chat-card lp-terminal-card">
@@ -1412,16 +1568,41 @@ export default function Launchpad({ bootstrap }: { bootstrap: Bootstrap }) {
             <h3>Session Status</h3>
             <div className="lp-kv">
               <div className="lp-kv-row"><span>Session</span><strong>{session.session_id || "-"}</strong></div>
-              <div className="lp-kv-row"><span>Status</span><strong>{session.status || "-"}</strong></div>
+              <div className="lp-kv-row">
+                <span>Status</span>
+                <strong className={`lp-status-pill is-${sessionTone}`}>{session.status || state.latestSessionStatus || "-"}</strong>
+              </div>
               <div className="lp-kv-row"><span>Provisioning Source</span><strong>{session.provisioning_source || "-"}</strong></div>
-              <div className="lp-kv-row"><span>Runtime</span><strong>{session.runtime_state || "-"}</strong></div>
+              <div className="lp-kv-row">
+                <span>Runtime</span>
+                <strong className={`lp-status-pill is-${runtimeTone}`}>{session.runtime_state || "-"}</strong>
+              </div>
             </div>
-            <div className="lp-links">
-              {session.instance_url && (
-                <a href={session.instance_url} target="_blank" rel="noopener noreferrer">Open Runtime</a>
-              )}
-              {session.verify_url && (
-                <a href={session.verify_url} target="_blank" rel="noopener noreferrer">Open Verify</a>
+            <div className="lp-gateway-grid">
+              {gatewayLinks.length > 0 ? (
+                gatewayLinks.map((gateway) => (
+                  <article key={gateway.key} className="lp-gateway-card">
+                    <div className="lp-gateway-card-head">
+                      <span className="lp-gateway-tag">{gateway.key === "runtime" ? "Runtime" : "Verify"}</span>
+                      <span className="lp-gateway-health">Online</span>
+                    </div>
+                    <p className="lp-gateway-title">{gateway.title}</p>
+                    <p className="lp-gateway-detail">{gateway.detail}</p>
+                    <p className="lp-gateway-url">{gateway.url}</p>
+                    <a
+                      href={gateway.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="lp-gateway-open"
+                    >
+                      Open Gateway
+                    </a>
+                  </article>
+                ))
+              ) : (
+                <div className="lp-gateway-empty">
+                  Gateway endpoints appear here after provisioning reaches ready state.
+                </div>
               )}
             </div>
           </section>

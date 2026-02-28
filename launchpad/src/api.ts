@@ -374,6 +374,7 @@ export const api = {
       provisioning_source?: string;
       runtime_state?: string;
       instance_url?: string;
+      app_url?: string;
       verify_url?: string;
       error?: string;
       detail?: string;

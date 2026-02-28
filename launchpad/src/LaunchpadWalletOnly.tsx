@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import type { Bootstrap } from "./App";
 import { api } from "./api";
 
@@ -40,6 +40,55 @@ function renderEnvironment(): string {
   return "Production";
 }
 
+function sanitizeRuntimeUrl(value: unknown): string {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    if (url.origin === window.location.origin) {
+      const currentPath = window.location.pathname.replace(/\/+$/, "") || "/";
+      const targetPath = url.pathname.replace(/\/+$/, "") || "/";
+      if (targetPath === currentPath || targetPath === "/frontdoor") {
+        return "";
+      }
+    }
+    return url.toString();
+  } catch (_) {
+    return "";
+  }
+}
+
+function statusTone(value: unknown): "positive" | "warning" | "negative" | "neutral" {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "neutral";
+  if (
+    normalized.includes("ready") ||
+    normalized.includes("running") ||
+    normalized.includes("active") ||
+    normalized.includes("healthy")
+  ) {
+    return "positive";
+  }
+  if (
+    normalized.includes("error") ||
+    normalized.includes("failed") ||
+    normalized.includes("denied") ||
+    normalized.includes("cancel")
+  ) {
+    return "negative";
+  }
+  if (
+    normalized.includes("launch") ||
+    normalized.includes("provision") ||
+    normalized.includes("pending") ||
+    normalized.includes("starting")
+  ) {
+    return "warning";
+  }
+  return "neutral";
+}
+
 export default function LaunchpadWalletOnly({ bootstrap }: { bootstrap: Bootstrap }) {
   const [state, setState] = useState({
     phase: "await_identity" as Phase,
@@ -71,7 +120,7 @@ export default function LaunchpadWalletOnly({ bootstrap }: { bootstrap: Bootstra
   const [composerEnabled, setComposerEnabled] = useState(false);
   const [chatAction, setChatAction] = useState<{ label: string; onClick: () => void } | null>(null);
   const [inputValue, setInputValue] = useState("");
-  const [session, setSession] = useState<{ session_id?: string; status?: string; provisioning_source?: string; runtime_state?: string; instance_url?: string; verify_url?: string }>({});
+  const [session, setSession] = useState<{ session_id?: string; status?: string; provisioning_source?: string; runtime_state?: string; instance_url?: string; app_url?: string; verify_url?: string }>({});
   const [configSummary, setConfigSummary] = useState<Config>({});
 
   const addMessage = useCallback((role: string, text: string) => {
@@ -132,7 +181,7 @@ export default function LaunchpadWalletOnly({ bootstrap }: { bootstrap: Bootstra
       setState((p) => ({ ...p, phase: "ready", pollingTimer: null }));
       setStepState("provisioning", "done", "Instance ready.");
       addMessage("assistant", "Your enclave is ready.");
-      const targetUrl = s.instance_url || s.verify_url || "";
+      const targetUrl = s.instance_url || s.app_url || s.verify_url || "";
       if (targetUrl && !state.redirectAttempted) {
         setState((p) => ({ ...p, redirectAttempted: true }));
         addMessage("system", "Session ready. Redirecting...");
@@ -311,6 +360,35 @@ export default function LaunchpadWalletOnly({ bootstrap }: { bootstrap: Bootstra
     handleUserInput(v);
   };
 
+  const safeInstanceUrl = useMemo(
+    () => sanitizeRuntimeUrl(session.instance_url || session.app_url),
+    [session.instance_url, session.app_url]
+  );
+  const safeVerifyUrl = useMemo(
+    () => sanitizeRuntimeUrl(session.verify_url),
+    [session.verify_url]
+  );
+  const sessionTone = statusTone(session.status || state.latestSessionStatus);
+  const runtimeTone = statusTone(session.runtime_state);
+  const gatewayLinks = useMemo(
+    () =>
+      [
+        {
+          key: "runtime",
+          title: "Runtime Gateway",
+          detail: "Primary endpoint for live agent runtime traffic.",
+          url: safeInstanceUrl,
+        },
+        {
+          key: "verify",
+          title: "Verification Gateway",
+          detail: "Audit and verification surface for receipts and proofs.",
+          url: safeVerifyUrl,
+        },
+      ].filter((gateway) => !!gateway.url),
+    [safeInstanceUrl, safeVerifyUrl]
+  );
+
   return (
     <>
       <div className="lp-bg lp-bg-a" />
@@ -380,13 +458,42 @@ export default function LaunchpadWalletOnly({ bootstrap }: { bootstrap: Bootstra
               <h3>Session Status</h3>
               <div className="lp-kv">
                 <div className="lp-kv-row"><span>Session</span><strong>{session.session_id || "-"}</strong></div>
-                <div className="lp-kv-row"><span>Status</span><strong>{session.status || "-"}</strong></div>
+                <div className="lp-kv-row">
+                  <span>Status</span>
+                  <strong className={`lp-status-pill is-${sessionTone}`}>{session.status || state.latestSessionStatus || "-"}</strong>
+                </div>
                 <div className="lp-kv-row"><span>Provisioning Source</span><strong>{session.provisioning_source || "-"}</strong></div>
-                <div className="lp-kv-row"><span>Runtime</span><strong>{session.runtime_state || "-"}</strong></div>
+                <div className="lp-kv-row">
+                  <span>Runtime</span>
+                  <strong className={`lp-status-pill is-${runtimeTone}`}>{session.runtime_state || "-"}</strong>
+                </div>
               </div>
-              <div className="lp-links">
-                {session.instance_url && <a href={session.instance_url} target="_blank" rel="noopener noreferrer">Open Runtime</a>}
-                {session.verify_url && <a href={session.verify_url} target="_blank" rel="noopener noreferrer">Open Verify</a>}
+              <div className="lp-gateway-grid">
+                {gatewayLinks.length > 0 ? (
+                  gatewayLinks.map((gateway) => (
+                    <article key={gateway.key} className="lp-gateway-card">
+                      <div className="lp-gateway-card-head">
+                        <span className="lp-gateway-tag">{gateway.key === "runtime" ? "Runtime" : "Verify"}</span>
+                        <span className="lp-gateway-health">Online</span>
+                      </div>
+                      <p className="lp-gateway-title">{gateway.title}</p>
+                      <p className="lp-gateway-detail">{gateway.detail}</p>
+                      <p className="lp-gateway-url">{gateway.url}</p>
+                      <a
+                        href={gateway.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="lp-gateway-open"
+                      >
+                        Open Gateway
+                      </a>
+                    </article>
+                  ))
+                ) : (
+                  <div className="lp-gateway-empty">
+                    Gateway endpoints appear here after provisioning reaches ready state.
+                  </div>
+                )}
               </div>
             </section>
           </aside>

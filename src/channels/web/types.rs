@@ -1039,6 +1039,8 @@ pub struct FrontdoorSessionResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instance_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub verify_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eigen_app_id: Option<String>,

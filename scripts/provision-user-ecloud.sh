@@ -76,6 +76,102 @@ process.stdin.on("end", () => {
 
 owner_wallet="$(printf '%s' "$wallet" | tr '[:upper:]' '[:lower:]')"
 
+normalize_repo_url() {
+  node -e '
+const raw = String(process.argv[1] || "").trim();
+if (!raw) process.exit(0);
+let url = raw;
+const gitAtMatch = url.match(/^git@([^:]+):(.+)$/);
+if (gitAtMatch) {
+  url = `https://${gitAtMatch[1]}/${gitAtMatch[2]}`;
+} else if (/^ssh:\/\/git@/i.test(url)) {
+  url = url
+    .replace(/^ssh:\/\/git@/i, "https://")
+    .replace(/\.git$/i, "");
+}
+if (!/^https?:\/\//i.test(url)) process.exit(0);
+url = url.replace(/\.git$/i, "").replace(/\/+$/g, "");
+process.stdout.write(url);
+' "$1"
+}
+
+resolve_source_repo_url() {
+  local candidate="${ECLOUD_FRONTDOOR_SOURCE_REPO_URL:-${ECLOUD_FRONTDOOR_REPO_URL:-${GATEWAY_FRONTDOOR_SOURCE_REPO_URL:-}}}"
+  if [[ -z "$candidate" && -n "${RAILWAY_GIT_REPO_FULL_NAME:-}" ]]; then
+    candidate="https://github.com/${RAILWAY_GIT_REPO_FULL_NAME}"
+  fi
+  if [[ -z "$candidate" && -n "${RAILWAY_GIT_REPO_OWNER:-}" && -n "${RAILWAY_GIT_REPO_NAME:-}" ]]; then
+    candidate="https://github.com/${RAILWAY_GIT_REPO_OWNER}/${RAILWAY_GIT_REPO_NAME}"
+  fi
+  if [[ -z "$candidate" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+    candidate="https://github.com/${GITHUB_REPOSITORY}"
+  fi
+  if [[ -z "$candidate" ]] && command -v git >/dev/null 2>&1; then
+    candidate="$(git config --get remote.origin.url 2>/dev/null || true)"
+  fi
+  normalize_repo_url "$candidate"
+}
+
+resolve_source_commit() {
+  local candidate="${ECLOUD_FRONTDOOR_SOURCE_COMMIT:-${ECLOUD_FRONTDOOR_COMMIT_SHA:-${GATEWAY_FRONTDOOR_SOURCE_COMMIT:-${RAILWAY_GIT_COMMIT_SHA:-${GITHUB_SHA:-}}}}}"
+  if [[ -z "$candidate" ]] && command -v git >/dev/null 2>&1; then
+    candidate="$(git rev-parse HEAD 2>/dev/null || true)"
+  fi
+  candidate="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  if [[ -z "$candidate" ]]; then
+    printf ''
+    return
+  fi
+  if [[ "$candidate" =~ ^[0-9a-f]{7,40}$ ]]; then
+    printf '%s' "$candidate"
+    return
+  fi
+  echo "warning: ignoring invalid source commit value: ${candidate}" >&2
+  printf ''
+}
+
+infer_app_url_from_verify_url() {
+  node -e '
+const verifyUrl = String(process.argv[1] || "").trim();
+const appId = String(process.argv[2] || "").trim();
+if (!verifyUrl) process.exit(0);
+let out = "";
+try {
+  const url = new URL(verifyUrl);
+  const host = url.hostname.toLowerCase();
+  if (host === "verify-sepolia.eigencloud.xyz") {
+    url.hostname = "sepolia.eigencloud.xyz";
+  } else if (host === "verify-mainnet.eigencloud.xyz" || host === "verify.eigencloud.xyz") {
+    url.hostname = "mainnet.eigencloud.xyz";
+  } else if (host.startsWith("verify-")) {
+    url.hostname = host.slice("verify-".length);
+  } else if (host.startsWith("verify.")) {
+    url.hostname = host.slice("verify.".length);
+  } else {
+    process.exit(0);
+  }
+
+  if (appId) {
+    const parts = url.pathname.split("/").filter(Boolean);
+    const normalized = parts.length >= 1 ? parts[0].toLowerCase() : "";
+    if (normalized !== "app" || parts.length < 2) {
+      url.pathname = `/app/${appId}`;
+    } else if (parts[1].toLowerCase() !== appId.toLowerCase()) {
+      url.pathname = `/app/${appId}`;
+    }
+  }
+  out = url.toString().replace(/\/$/, "");
+} catch (_) {
+  process.exit(0);
+}
+process.stdout.write(out);
+' "$1" "$2"
+}
+
+log_phase() {
+  printf 'provision_phase: %s\n' "$1" >&2
+}
+
 settings_payload="$(FRONTDOOR_OWNER_WALLET="$owner_wallet" printf '%s' "$config_json" | node -e '
 let data = "";
 process.stdin.on("data", (d) => data += d);
@@ -128,8 +224,43 @@ process.stdin.on("end", () => {
 
 env_name="${ECLOUD_ENV:-sepolia}"
 prefix="${ECLOUD_FRONTDOOR_APP_PREFIX:-enclagent-user}"
-name="${prefix}-${wallet#0x}"
-name="${name:0:42}-${session:0:8}"
+name="$(node -e '
+const rawPrefix = process.argv[1] || "enclagent-user";
+const rawProfile = process.argv[2] || "session";
+const rawWallet = process.argv[3] || "";
+const rawSession = process.argv[4] || "";
+const slug = (value, fallback, maxLen) => {
+  const normalized = String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const trimmed = normalized.slice(0, maxLen).replace(/-+$/g, "");
+  return trimmed || fallback;
+};
+const prefix = slug(rawPrefix, "enclagent", 16);
+let profile = slug(rawProfile, "session", 20);
+const walletHex = String(rawWallet || "")
+  .toLowerCase()
+  .replace(/^0x/, "")
+  .replace(/[^a-f0-9]/g, "");
+const walletTail = walletHex.slice(-6) || "user";
+const sessionTag =
+  String(rawSession || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 8) || "session";
+let name = `${prefix}-${profile}-${walletTail}-${sessionTag}`;
+if (name.length > 50) {
+  const staticLen = prefix.length + walletTail.length + sessionTag.length + 3;
+  const maxProfile = Math.max(8, 50 - staticLen);
+  profile = profile.slice(0, maxProfile).replace(/-+$/g, "") || "session";
+  name = `${prefix}-${profile}-${walletTail}-${sessionTag}`;
+}
+if (name.length > 50) {
+  name = name.slice(0, 50).replace(/-+$/g, "");
+}
+process.stdout.write(name || `enclagent-${sessionTag}`);
+' "$prefix" "$profile_name" "$wallet" "$session")"
 description="Enclagent session ${session:0:12} (${profile_name})"
 instance_type="${ECLOUD_FRONTDOOR_INSTANCE_TYPE:-g1-standard-4t}"
 instance_port="${ECLOUD_FRONTDOOR_INSTANCE_PORT:-3000}"
@@ -142,6 +273,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
+append_env_var_if_set() {
+  local key="$1"
+  local value="${!key:-}"
+  if [[ -z "$value" ]]; then
+    return
+  fi
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "skipping ${key}: multiline values are not supported in env-file output" >&2
+    return
+  fi
+  printf '%s=%s\n' "$key" "$value" >> "$effective_env_file"
+}
+
 if [[ -n "${ECLOUD_FRONTDOOR_ENV_FILE:-}" ]]; then
   if [[ ! -f "${ECLOUD_FRONTDOOR_ENV_FILE}" ]]; then
     echo "ECLOUD_FRONTDOOR_ENV_FILE does not exist: ${ECLOUD_FRONTDOOR_ENV_FILE}" >&2
@@ -149,6 +293,21 @@ if [[ -n "${ECLOUD_FRONTDOOR_ENV_FILE:-}" ]]; then
   fi
   cp "${ECLOUD_FRONTDOOR_ENV_FILE}" "$effective_env_file"
 fi
+
+# Inherit core runtime/LLM settings from the frontdoor process so per-session
+# instances do not rely on placeholder values in static env templates.
+append_env_var_if_set DATABASE_BACKEND
+append_env_var_if_set LIBSQL_PATH
+append_env_var_if_set DATABASE_URL
+append_env_var_if_set LLM_BACKEND
+append_env_var_if_set ANTHROPIC_API_KEY
+append_env_var_if_set ANTHROPIC_BASE_URL
+append_env_var_if_set ANTHROPIC_MODEL
+append_env_var_if_set OPENAI_API_KEY
+append_env_var_if_set OPENAI_MODEL
+append_env_var_if_set OPENAI_BASE_URL
+append_env_var_if_set CLI_ENABLED
+append_env_var_if_set RUST_LOG
 
 FRONTDOOR_OWNER_WALLET="$owner_wallet" printf '%s' "$config_json" | node -e '
 let data = "";
@@ -211,10 +370,161 @@ deploy_args=(
   --skip-profile
 )
 
-deploy_output="$(ecloud "${deploy_args[@]}" 2>&1)" || {
+source_repo_url="$(resolve_source_repo_url)"
+source_commit="$(resolve_source_commit)"
+strict_source_provenance="$(printf '%s' "${ECLOUD_FRONTDOOR_STRICT_SOURCE_PROVENANCE:-false}" | tr '[:upper:]' '[:lower:]')"
+verifiable_source_args=()
+if [[ -n "$source_repo_url" && -n "$source_commit" ]]; then
+  verifiable_source_args+=(--repo "$source_repo_url" --commit "$source_commit")
+elif [[ -n "$source_repo_url" || -n "$source_commit" ]]; then
+  echo "warning: incomplete source provenance metadata; both repo URL and commit are required" >&2
+  if [[ "$strict_source_provenance" =~ ^(true|1|yes|on)$ ]]; then
+    echo "strict source provenance enabled; refusing deploy without both source repo URL and source commit" >&2
+    exit 1
+  fi
+fi
+
+force_verifiable="$(printf '%s' "${ECLOUD_FRONTDOOR_FORCE_VERIFIABLE:-false}" | tr '[:upper:]' '[:lower:]')"
+deploy_max_retries_raw="${ECLOUD_FRONTDOOR_DEPLOY_MAX_RETRIES:-24}"
+deploy_retry_backoff_raw="${ECLOUD_FRONTDOOR_DEPLOY_RETRY_BACKOFF_SECS:-15}"
+deploy_retry_timeout_raw="${ECLOUD_FRONTDOOR_DEPLOY_RETRY_TIMEOUT_SECS:-900}"
+if [[ ! "$deploy_max_retries_raw" =~ ^[0-9]+$ ]]; then
+  deploy_max_retries_raw=24
+fi
+if [[ ! "$deploy_retry_backoff_raw" =~ ^[0-9]+$ ]] || (( deploy_retry_backoff_raw < 1 )); then
+  deploy_retry_backoff_raw=15
+fi
+if [[ ! "$deploy_retry_timeout_raw" =~ ^[0-9]+$ ]] || (( deploy_retry_timeout_raw < 30 )); then
+  deploy_retry_timeout_raw=900
+fi
+
+run_deploy_once() {
+  local output_file="$1"
+  : > "$output_file"
+  case "$force_verifiable" in
+    true|1|yes|on)
+      ecloud "${deploy_args[@]}" --verifiable "${verifiable_source_args[@]}" 2>&1 | tee "$output_file"
+      local statuses=("${PIPESTATUS[@]}")
+      return "${statuses[0]}"
+      ;;
+    *)
+      # Non-interactive safety: answer "no" to verifiable-build prompt when
+      # deploying prebuilt images that are not in EigenLayer's verifiable registry.
+      printf 'n\n' | ecloud "${deploy_args[@]}" 2>&1 | tee "$output_file"
+      local statuses=("${PIPESTATUS[@]}")
+      return "${statuses[1]}"
+      ;;
+  esac
+}
+
+capture_active_build_context() {
+  local build_json
+  local build_context
+
+  build_json="$(ecloud compute build list --environment "$env_name" --limit 1 --json 2>/dev/null || true)"
+  if [[ -z "$build_json" ]]; then
+    return
+  fi
+
+  build_context="$(printf '%s' "$build_json" | node -e '
+const raw = require("fs").readFileSync(0, "utf8");
+try {
+  const parsed = JSON.parse(raw);
+  const latest = Array.isArray(parsed) ? parsed[0] : null;
+  if (!latest || typeof latest !== "object") process.exit(0);
+  const status = String(latest.status || "").toLowerCase();
+  if (!status) process.exit(0);
+  const buildId = String(latest.buildId || "");
+  const repo = String(latest.repoUrl || "").replace(/\.git$/i, "");
+  const gitRef = String(latest.gitRef || "");
+  const createdAt = String(latest.createdAt || "");
+  const updatedAt = String(latest.updatedAt || "");
+  const segments = [
+    `status=${status}`,
+    buildId ? `build_id=${buildId}` : "",
+    repo ? `repo=${repo}` : "",
+    gitRef ? `git_ref=${gitRef}` : "",
+    createdAt ? `created_at=${createdAt}` : "",
+    updatedAt ? `updated_at=${updatedAt}` : ""
+  ].filter(Boolean);
+  process.stdout.write(segments.join(" "));
+} catch (_err) {
+  process.exit(0);
+}
+')" || true
+
+  if [[ -n "$build_context" ]]; then
+    log_phase "eigencloud build queue context ${build_context}"
+  fi
+}
+
+log_phase "eigencloud provisioning started env=${env_name} ironclaw_profile=${profile_name} session=${session}"
+if [[ -n "$source_repo_url" && -n "$source_commit" ]]; then
+  log_phase "eigencloud verifiable source repo=${source_repo_url} commit=${source_commit}"
+fi
+
+deploy_attempt=1
+deploy_retry_started_at="$(date +%s)"
+deploy_attempt_cap_display="$deploy_max_retries_raw"
+if (( deploy_max_retries_raw == 0 )); then
+  deploy_attempt_cap_display="unbounded"
+fi
+while true; do
+  log_phase "eigencloud deploy attempt=${deploy_attempt}/${deploy_attempt_cap_display} verifiable=${force_verifiable}"
+  attempt_output_file="$(mktemp)"
+  set +e
+  run_deploy_once "$attempt_output_file"
+  deploy_status=$?
+  set -e
+  deploy_output="$(cat "$attempt_output_file")"
+  rm -f "$attempt_output_file"
+
+  if [[ "$deploy_status" -eq 0 ]]; then
+    log_phase "eigencloud deploy succeeded attempt=${deploy_attempt}"
+    break
+  fi
+
+  if printf '%s' "$deploy_output" | grep -Eiq 'buildapi request failed:\s*429|too many requests|buildapi request failed:\s*409|already have a build in progress'; then
+    retry_reason="eigencloud_build_queue_or_throttle"
+    if printf '%s' "$deploy_output" | grep -Eiq 'buildapi request failed:\s*409|already have a build in progress'; then
+      retry_reason="eigencloud_build_queue_conflict_409"
+      capture_active_build_context
+    elif printf '%s' "$deploy_output" | grep -Eiq 'buildapi request failed:\s*429|too many requests'; then
+      retry_reason="eigencloud_build_throttle_429"
+    fi
+
+    retry_now="$(date +%s)"
+    retry_elapsed=$((retry_now - deploy_retry_started_at))
+    if (( retry_elapsed >= deploy_retry_timeout_raw )); then
+      echo "$deploy_output" >&2
+      echo "error: deploy retry timeout exceeded (${retry_elapsed}s >= ${deploy_retry_timeout_raw}s) reason=${retry_reason}" >&2
+      exit 1
+    fi
+
+    if (( deploy_max_retries_raw > 0 && deploy_attempt >= deploy_max_retries_raw )); then
+      echo "$deploy_output" >&2
+      echo "error: deploy retry attempts exceeded (${deploy_attempt}/${deploy_max_retries_raw}) reason=${retry_reason}" >&2
+      exit 1
+    fi
+
+    sleep_seconds="$deploy_retry_backoff_raw"
+    remaining_retry_budget=$((deploy_retry_timeout_raw - retry_elapsed))
+    if (( sleep_seconds > remaining_retry_budget )); then
+      sleep_seconds="$remaining_retry_budget"
+    fi
+    if (( sleep_seconds < 1 )); then
+      sleep_seconds=1
+    fi
+
+    echo "warning: ${retry_reason}; retrying deploy in ${sleep_seconds}s (attempt ${deploy_attempt}/${deploy_attempt_cap_display}, elapsed=${retry_elapsed}s/${deploy_retry_timeout_raw}s)" >&2
+    sleep "$sleep_seconds"
+    deploy_attempt=$((deploy_attempt + 1))
+    continue
+  fi
+
   echo "$deploy_output" >&2
   exit 1
-}
+done
 
 app_id="$(printf '%s\n' "$deploy_output" | sed -n 's/^[[:space:]]*App ID:[[:space:]]*//p' | tail -n1)"
 if [[ -z "$app_id" ]]; then
@@ -225,65 +535,129 @@ if [[ -z "$app_id" ]]; then
   echo "$deploy_output" >&2
   exit 1
 fi
+log_phase "eigencloud app allocated app_id=${app_id}"
 
 instance_ip="$(printf '%s\n' "$deploy_output" | sed -n 's/^[[:space:]]*Instance IP:[[:space:]]*//p' | tail -n1)"
-if [[ -z "$instance_ip" ]]; then
+app_url="$(printf '%s\n' "$deploy_output" | sed -n 's/^[[:space:]]*App URL:[[:space:]]*//p' | tail -n1)"
+if [[ -z "$instance_ip" || -z "$app_url" ]]; then
+  log_phase "eigencloud app info lookup app_id=${app_id}"
   info_output="$(ecloud compute app info "$app_id" --environment "$env_name" 2>&1 || true)"
-  instance_ip="$(printf '%s\n' "$info_output" | sed -n 's/^[[:space:]]*Instance IP:[[:space:]]*//p' | tail -n1)"
-fi
-if [[ -z "$instance_ip" ]]; then
-  echo "failed to determine instance IP for app $app_id" >&2
-  exit 1
-fi
-
-instance_url="http://${instance_ip}:${instance_port}/gateway"
-if [[ -n "$gateway_auth_key" ]]; then
-  encoded_gateway_auth_key="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1] || ""));' "$gateway_auth_key")"
-  # Use URL fragment to avoid sending gateway auth token via HTTP request line/referrer.
-  instance_url="${instance_url}#token=${encoded_gateway_auth_key}"
-fi
-
-health_url="http://${instance_ip}:${instance_port}/api/health"
-import_url="http://${instance_ip}:${instance_port}/api/settings/import"
-healthy=0
-for _attempt in $(seq 1 30); do
-  if curl -fsS --max-time 8 "$health_url" >/dev/null 2>&1; then
-    healthy=1
-    break
+  if [[ -z "$instance_ip" ]]; then
+    instance_ip="$(printf '%s\n' "$info_output" | sed -n 's/^[[:space:]]*Instance IP:[[:space:]]*//p' | tail -n1)"
   fi
-  sleep 2
-done
-if [[ "$healthy" -ne 1 ]]; then
-  echo "instance did not become healthy at ${health_url}" >&2
-  exit 1
+  if [[ -z "$app_url" ]]; then
+    app_url="$(printf '%s\n' "$info_output" | sed -n 's/^[[:space:]]*App URL:[[:space:]]*//p' | tail -n1)"
+  fi
 fi
 
-imported=0
-for _attempt in $(seq 1 20); do
-  if curl -fsS --max-time 12 \
-    -H "Authorization: Bearer ${gateway_auth_key}" \
-    -H "Content-Type: application/json" \
-    --data "$settings_payload" \
-    "$import_url" >/dev/null 2>&1; then
-    imported=1
-    break
+if [[ -z "$app_url" ]]; then
+  app_base="${GATEWAY_FRONTDOOR_ECLOUD_APP_BASE_URL:-${ECLOUD_FRONTDOOR_APP_BASE_URL:-}}"
+  if [[ -z "$app_base" ]]; then
+    case "$env_name" in
+      sepolia) app_base="https://sepolia.eigencloud.xyz/app" ;;
+      mainnet) app_base="https://mainnet.eigencloud.xyz/app" ;;
+    esac
   fi
-  sleep 2
-done
-if [[ "$imported" -ne 1 ]]; then
-  echo "failed importing session settings into app ${app_id}" >&2
-  exit 1
+  if [[ -n "$app_base" ]]; then
+    app_url="${app_base%/}/${app_id}"
+  fi
 fi
 
 verify_base="${GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL:-https://verify-sepolia.eigencloud.xyz/app}"
 verify_url="${verify_base%/}/${app_id}"
 
+if [[ -z "$app_url" ]]; then
+  inferred_app_url="$(infer_app_url_from_verify_url "$verify_url" "$app_id")"
+  if [[ -n "$inferred_app_url" ]]; then
+    app_url="$inferred_app_url"
+  fi
+fi
+
+instance_url="${app_url:-$verify_url}"
+
+gateway_url=""
+if [[ -n "$instance_ip" ]]; then
+  log_phase "ironclaw runtime endpoint candidate ip=${instance_ip} port=${instance_port}"
+  gateway_url="http://${instance_ip}:${instance_port}/gateway"
+  if [[ -n "$gateway_auth_key" ]]; then
+    encoded_gateway_auth_key="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1] || ""));' "$gateway_auth_key")"
+    # Use URL fragment to avoid sending gateway auth token via HTTP request line/referrer.
+    gateway_url="${gateway_url}#token=${encoded_gateway_auth_key}"
+  fi
+fi
+
+strict_instance_init="$(printf '%s' "${ECLOUD_FRONTDOOR_STRICT_INSTANCE_INIT:-false}" | tr '[:upper:]' '[:lower:]')"
+require_strict_init=0
+case "$strict_instance_init" in
+  true|1|yes|on) require_strict_init=1 ;;
+esac
+
+seeded=0
+if [[ -n "$gateway_url" ]]; then
+  log_phase "ironclaw runtime health probe start app_id=${app_id}"
+  health_url="http://${instance_ip}:${instance_port}/api/health"
+  import_url="http://${instance_ip}:${instance_port}/api/settings/import"
+  healthy=0
+  for _attempt in $(seq 1 30); do
+    if curl -fsS --max-time 8 "$health_url" >/dev/null 2>&1; then
+      healthy=1
+      break
+    fi
+    sleep 2
+  done
+
+  if [[ "$healthy" -eq 1 ]]; then
+    log_phase "ironclaw runtime health probe passed app_id=${app_id}; importing session settings"
+    imported=0
+    for _attempt in $(seq 1 20); do
+      if curl -fsS --max-time 12 \
+        -H "Authorization: Bearer ${gateway_auth_key}" \
+        -H "Content-Type: application/json" \
+        --data "$settings_payload" \
+        "$import_url" >/dev/null 2>&1; then
+        imported=1
+        break
+      fi
+      sleep 2
+    done
+
+    if [[ "$imported" -eq 1 ]]; then
+      seeded=1
+      instance_url="$gateway_url"
+      log_phase "ironclaw runtime settings import succeeded app_id=${app_id}"
+    else
+      echo "warning: failed importing session settings into app ${app_id}; returning app/verify URL fallback" >&2
+    fi
+  else
+    echo "warning: instance health check timed out at ${health_url}; returning app/verify URL fallback" >&2
+  fi
+else
+  log_phase "ironclaw runtime instance IP unavailable app_id=${app_id}; using app/verify URL"
+  echo "warning: no instance IP discovered for app ${app_id}; returning app/verify URL fallback" >&2
+fi
+
+if [[ "$require_strict_init" -eq 1 && "$seeded" -ne 1 ]]; then
+  echo "strict instance init enabled and gateway seeding failed for app ${app_id}" >&2
+  exit 1
+fi
+
 node -e '
+const instanceUrl = process.argv[1];
+const appUrl = process.argv[2] || "";
+const verifyUrl = process.argv[3];
+const appId = process.argv[4];
+const gatewayUrl = process.argv[5] || "";
+const sourceRepoUrl = process.argv[6] || "";
+const sourceCommit = process.argv[7] || "";
 const payload = {
-  instance_url: process.argv[1],
-  verify_url: process.argv[2],
-  app_id: process.argv[3]
+  instance_url: instanceUrl,
+  verify_url: verifyUrl,
+  app_id: appId
 };
+if (appUrl) payload.app_url = appUrl;
+if (gatewayUrl) payload.gateway_url = gatewayUrl;
+if (sourceRepoUrl) payload.source_repo_url = sourceRepoUrl;
+if (sourceCommit) payload.source_commit = sourceCommit;
 process.stdout.write(JSON.stringify(payload));
-' "$instance_url" "$verify_url" "$app_id"
+' "$instance_url" "$app_url" "$verify_url" "$app_id" "$gateway_url" "$source_repo_url" "$source_commit"
 printf '\n'

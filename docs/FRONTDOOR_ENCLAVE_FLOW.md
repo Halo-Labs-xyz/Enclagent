@@ -105,11 +105,13 @@ Configure one provisioning path:
 - Polling status events are deduplicated and chat history is capped to prevent runaway DOM growth and UI freezes under long-running sessions.
 - User objective is collected in chat before any provisioning action.
 - Gateway calls `suggest-config` and launchpad then requests a blueprint through the gateway OpenAI-compatible APIs (`GET /v1/models`, `POST /v1/chat/completions`) to use the active Anthropic-compatible model (for example MiniMax via Anthropic-compatible base URL) with deterministic fallback when unavailable.
+- `suggest-config` now auto-generates `profile_name` from user intent + connected wallet (unless an explicit non-default profile name is supplied) so dedicated app names are user/objective-specific.
 - Blueprint response includes a Mermaid graph plus markdown seed content for `IDENTITY.md` and `MISSION.md`; launchpad stores these under `config.domain_overrides` as launch-time seed artifacts.
 - Mermaid graph blocks in assistant messages are rendered into visual diagrams directly in chat (with fallback to source graph text if render fails).
 - Launchpad renders the interactive progression CTA (continue/retry) inline in the chat stream to keep the setup flow action-driven inside message context.
 - Launchpad derives and displays runtime decision (`shared` fallback posture vs `dedicated` enclave posture) before challenge/sign.
 - During `launching`/`provisioning`, launchpad switches from chat panel to a terminal-mode stream fed by timeline events (`/api/frontdoor/session/{session_id}/timeline`) and renders tagged provision logs (Railway/eCloud/provision channels) in near-real time.
+- While eCloud builds are in-flight, frontdoor emits heartbeat provisioning logs every ~20s so long verifiable builds are observable instead of appearing stalled.
 - No instance is provisioned until explicit user confirmation and successful wallet signature.
 - When session status transitions to `ready`, launchpad now auto-redirects to `instance_url` (or `verify_url` fallback). Embedded launchpad posts a redirect bridge message to parent gateway and also applies top-window fallback redirect.
 
@@ -130,6 +132,7 @@ The command **must print** provisioning output to stdout:
 - JSON is preferred to return both gateway URL and Eigen verify URL.
 - Supported JSON keys:
   - `instance_url` / `url` / `gateway_url`
+  - `app_url`
   - `verify_url` / `eigen_verify_url` / `eigen_app_url`
   - `app_id` / `eigen_app_id` (used with `GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL`)
 
@@ -178,6 +181,12 @@ Example:
 ```bash
 ECLOUD_FRONTDOOR_IMAGE_REF=docker.io/your-org/enclagent:latest
 ECLOUD_FRONTDOOR_ENV_FILE=/app/deploy/ecloud-instance.env
+ECLOUD_FRONTDOOR_FORCE_VERIFIABLE=true
+ECLOUD_FRONTDOOR_SOURCE_REPO_URL=https://github.com/halo-labs-xyz/Enclagent
+ECLOUD_FRONTDOOR_SOURCE_COMMIT=<git-sha>
+ECLOUD_FRONTDOOR_STRICT_SOURCE_PROVENANCE=true
+GATEWAY_FRONTDOOR_ECLOUD_APP_BASE_URL=https://sepolia.eigencloud.xyz/app
+ECLOUD_FRONTDOOR_STRICT_INSTANCE_INIT=false
 GATEWAY_FRONTDOOR_PROVISION_COMMAND=/app/scripts/provision-user-ecloud.sh --wallet '{wallet_address}' --session '{session_id}' --config '{config_b64}'
 ```
 
@@ -185,6 +194,14 @@ The bundled provisioner script also:
 
 - Sets per-instance `GATEWAY_AUTH_TOKEN` to the user-provided `gateway_auth_key`.
 - Applies runtime/wallet env overrides from frontdoor config before deploy.
+- Carries forward base runtime/LLM env (`DATABASE_*`, `LLM_BACKEND`, `ANTHROPIC_*`, etc.) from the frontdoor service process so per-session instances do not inherit template placeholders.
+- Uses non-interactive deploy mode. Set `ECLOUD_FRONTDOOR_FORCE_VERIFIABLE=true` to require `--verifiable` image/source checks during app deploy.
+- Retries verifiable deploy on EigenCloud throttling/queue conflicts (`429 Too Many Requests`, `409 build already in progress`) using queue-safe fixed backoff with bounded retry budget (defaults: `ECLOUD_FRONTDOOR_DEPLOY_MAX_RETRIES=24`, `ECLOUD_FRONTDOOR_DEPLOY_RETRY_BACKOFF_SECS=15`, `ECLOUD_FRONTDOOR_DEPLOY_RETRY_TIMEOUT_SECS=900`; set `ECLOUD_FRONTDOOR_DEPLOY_MAX_RETRIES=0` to disable attempt-cap and rely on timeout budget only).
+- On `409` queue conflicts, the provisioner emits explicit EigenCloud build-queue context (`status`, `build_id`, `repo`, `git_ref`, timestamps) to timeline logs so operators can correlate frontdoor retries to the currently active upstream verifiable build.
+- When verifiable mode is enabled, set `ECLOUD_FRONTDOOR_SOURCE_REPO_URL` + `ECLOUD_FRONTDOOR_SOURCE_COMMIT` so EigenCloud provenance points to the correct GitHub source.
+- Falls back to verify portal URL when direct gateway health/import seeding fails; set `ECLOUD_FRONTDOOR_STRICT_INSTANCE_INIT=true` to fail hard instead.
+- Returns `app_url` when available so frontdoor can surface distinct runtime/app/verify links instead of duplicating verify URLs.
+- If eCloud omits `App URL`, derives runtime `app_url` from verify URL + `app_id` (`verify-sepolia` -> `sepolia`) so runtime endpoint does not collapse to verify endpoint.
 - Forces wallet association by defaulting `wallet_vault_policy.user_wallet_address` to the connected wallet when not explicitly set.
 - Applies verification-backend overrides (`verification_backend.*`) for each spawned enclave.
 - Waits for instance health, then imports full settings (including copytrading + verification policy) via `/api/settings/import`.
@@ -217,17 +234,17 @@ Public (no gateway token required):
 - `GET /api/frontdoor/session/{session_id}`
 - `GET /api/frontdoor/session/{session_id}/timeline`
 - `GET /api/frontdoor/session/{session_id}/verification-explanation`
-- `POST /api/frontdoor/session/{session_id}/runtime-control`
 - `GET /api/frontdoor/session/{session_id}/gateway-todos`
 - `GET /api/frontdoor/session/{session_id}/funding-preflight`
 - `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>` (wallet filter required, `limit` clamped to `1..100`)
 
 Gateway APIs when frontdoor mode is enabled:
 
+- `POST /api/frontdoor/session/{session_id}/runtime-control` (requires gateway auth token)
 - `GET /api/frontdoor/operator/sessions?wallet_address=<0x...>&limit=<n>` (full session payloads)
 - `GET /api/gateway/todos?wallet_address=<0x...>&session_id=<uuid>&limit=<n>` (aggregated TODO feeds)
 
-In frontdoor mode, gateway bearer-token auth is bypassed so users land directly in the main gateway and can complete Privy signup/onboarding without token entry.
+In frontdoor mode, frontdoor onboarding/session-read APIs stay public for launch flow, while operator/control-plane APIs remain bearer-token protected.
 
 Session status/monitor responses include provisioning audit fields:
 
@@ -248,7 +265,7 @@ Generated gateway state should also surface TODO readiness fields:
 - `todo_open_recommended_count`
 - `todo_status_summary`
 
-`/api/frontdoor/sessions` returns redacted summary rows (no session UUID, instance URL, or verify URL) for safer public monitoring.
+`/api/frontdoor/sessions` returns redacted summary rows (no session UUID, instance/app/verify URLs) for safer public monitoring.
 
 `POST /api/frontdoor/session/{session_id}/runtime-control` accepts:
 

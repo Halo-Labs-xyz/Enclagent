@@ -1246,12 +1246,26 @@ async function signMessage(message, walletAddress) {
   if (!state.ethereumProvider) {
     throw new Error("Wallet provider unavailable for signing.");
   }
-  const attempts = buildPersonalSignParamAttempts(message, walletAddress);
+  const personalAttempts = buildPersonalSignParamAttempts(message, walletAddress);
+  const ethSignAttempts = buildEthSignParamAttempts(message, walletAddress);
   let lastErr = null;
-  for (const params of attempts) {
+  for (const params of personalAttempts) {
     try {
       const signature = await state.ethereumProvider.request({
         method: "personal_sign",
+        params,
+      });
+      if (signature && typeof signature === "string") {
+        return signature;
+      }
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  for (const params of ethSignAttempts) {
+    try {
+      const signature = await state.ethereumProvider.request({
+        method: "eth_sign",
         params,
       });
       if (signature && typeof signature === "string") {
@@ -1271,6 +1285,16 @@ function buildPersonalSignParamAttempts(message, address) {
   return [
     [hexMessage, wallet],
     [msg, wallet],
+    [wallet, hexMessage],
+    [wallet, msg],
+  ];
+}
+
+function buildEthSignParamAttempts(message, address) {
+  const hexMessage = toHexUtf8(message);
+  const msg = String(message || "");
+  const wallet = String(address || "");
+  return [
     [wallet, hexMessage],
     [wallet, msg],
   ];
@@ -1660,6 +1684,7 @@ function handleSessionStatus(session) {
     verificationLevel: session.verification_level,
     fallbackSigned: session.verification_fallback_require_signed_receipts,
     appId: session.eigen_app_id,
+    appUrl: session.app_url,
     verifyUrl: session.verify_url,
   });
   renderRuntimeControlState();
@@ -1671,20 +1696,21 @@ function handleSessionStatus(session) {
     return;
   }
 
-  if (session.status === "ready" && (session.instance_url || session.verify_url)) {
-    const destination = sanitizeRedirectUrl(session.instance_url || session.verify_url);
+  if (session.status === "ready" && (session.instance_url || session.app_url || session.verify_url)) {
+    const destination = sanitizeRedirectUrl(session.instance_url || session.app_url || session.verify_url);
     if (!destination) {
-      el.loadingTitle.textContent = "Provisioning returned an invalid URL";
-      el.loadingCopy.textContent = "Refusing redirect because destination is not http/https.";
-      el.loadingError.textContent = "Invalid destination URL from provisioning backend.";
+      el.loadingTitle.textContent = "Provisioning complete";
+      el.loadingCopy.textContent =
+        "Dedicated runtime URL not available yet. Staying on this terminal view.";
+      el.loadingError.textContent = "";
       return;
     }
-    advanceLoading("Enclave ready. Redirecting...", 100);
+    advanceLoading("Enclave ready.", 100);
     el.loadingTitle.textContent = "Your enclaved interface is live";
     if (session.dedicated_instance) {
-      el.loadingCopy.textContent = "Launching your dedicated Enclagent instance now.";
+      el.loadingCopy.textContent = "Dedicated runtime endpoint is ready. Open it from the links below.";
     } else {
-      el.loadingCopy.textContent = "Opening configured instance URL for this gateway.";
+      el.loadingCopy.textContent = "Shared runtime endpoint is ready. Open it from the links below.";
     }
     el.openInstanceLink.href = destination;
     const safeVerifyUrl = sanitizeRedirectUrl(session.verify_url);
@@ -1693,9 +1719,6 @@ function handleSessionStatus(session) {
       el.openVerifyLink.classList.remove("hidden");
     }
     el.readyActions.classList.remove("hidden");
-    setTimeout(() => {
-      window.location.assign(destination);
-    }, 1400);
     return;
   }
 
@@ -1763,6 +1786,7 @@ function renderSessionKv(model) {
     );
   }
   if (model.appId) rows.push("<p><strong>Eigen App:</strong> " + escapeHtml(String(model.appId)) + "</p>");
+  if (model.appUrl) rows.push("<p><strong>App:</strong> " + escapeHtml(String(model.appUrl)) + "</p>");
   if (model.verifyUrl) rows.push("<p><strong>Verify:</strong> " + escapeHtml(String(model.verifyUrl)) + "</p>");
   el.sessionKv.innerHTML = rows.join("");
 }
@@ -2106,6 +2130,7 @@ async function refreshTypedApiSurfaces(sessionId, options) {
       verificationLevel: sessionModel.verification_level,
       fallbackSigned: sessionModel.verification_fallback_require_signed_receipts,
       appId: sessionModel.eigen_app_id,
+      appUrl: sessionModel.app_url,
       verifyUrl: sessionModel.verify_url,
     });
     successCount += 1;
@@ -3866,6 +3891,7 @@ function parseSessionResponse(payload) {
       "Session response"
     ),
     instance_url: optionalStringField(root, "instance_url", "Session response"),
+    app_url: optionalStringField(root, "app_url", "Session response"),
     verify_url: optionalStringField(root, "verify_url", "Session response"),
     eigen_app_id: optionalStringField(root, "eigen_app_id", "Session response"),
     error: optionalStringField(root, "error", "Session response"),
@@ -4436,6 +4462,13 @@ function sanitizeRedirectUrl(value) {
     const url = new URL(String(value), window.location.origin);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       return null;
+    }
+    if (url.origin === window.location.origin) {
+      const currentPath = (window.location.pathname || "").replace(/\/+$/, "") || "/";
+      const targetPath = (url.pathname || "").replace(/\/+$/, "") || "/";
+      if (targetPath === currentPath || targetPath === "/frontdoor") {
+        return null;
+      }
     }
     return url.toString();
   } catch (_) {
