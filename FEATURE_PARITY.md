@@ -559,7 +559,7 @@ This document tracks feature parity between Enclagent (Rust implementation) and 
 | Feature | OpenClaw | Enclagent | Notes |
 |---------|----------|----------|-------|
 | Versioned frontdoor config contract | ❌ | ✅ | `config_version`, `profile_domain`, extensible `domain_overrides` |
-| Inference-driven config suggestion API | ❌ | ✅ | `POST /api/frontdoor/suggest-config` with server-side validation |
+| Inference-driven config suggestion API | ❌ | ✅ | `POST /api/frontdoor/suggest-config` with server-side validation + launchpad blueprint enrichment (Mermaid + markdown seed artifacts) |
 | Frontdoor config introspection endpoint | ❌ | ✅ | `GET /api/frontdoor/config-contract` |
 | Frontdoor policy template library endpoint | ❌ | ✅ | `GET /api/frontdoor/policy-templates` with typed templates, risk profile, and config defaults |
 | Frontdoor experience manifest endpoint | ❌ | ✅ | `GET /api/frontdoor/experience/manifest` with typed steps/capabilities/constraints/evidence labels |

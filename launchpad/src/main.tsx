@@ -1,36 +1,20 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
+import { Buffer } from "buffer";
+
+const g = globalThis as unknown as { Buffer?: typeof Buffer; global?: unknown };
+if (!g.global) {
+  g.global = globalThis;
+}
+if (!g.Buffer) {
+  g.Buffer = Buffer;
+}
 
 const rootEl = document.getElementById("root");
 if (!rootEl) throw new Error("Root element not found");
-const root = createRoot(rootEl);
 
-root.render(
-  <React.StrictMode>
-    <div className="lp-shell" style={{ padding: 24 }}>
-      <p className="lp-eyebrow">Loading launchpad...</p>
-    </div>
-  </React.StrictMode>
-);
-
-const mountApp = async () => {
-  const { default: App } = await import("./App");
-  root.render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>
+void import("./App").then(({ default: App }) => {
+  createRoot(rootEl).render(
+    <App />
   );
-};
-
-if ("requestIdleCallback" in window) {
-  (window as Window & { requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => number }).requestIdleCallback(
-    () => {
-      void mountApp();
-    },
-    { timeout: 250 }
-  );
-} else {
-  setTimeout(() => {
-    void mountApp();
-  }, 0);
-}
+});

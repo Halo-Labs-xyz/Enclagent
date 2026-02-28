@@ -95,16 +95,21 @@ Configure one provisioning path:
 
 - `/frontdoor` now serves a simplified chat-first launchpad surface.
 - Launchpad UI source-of-truth is the TypeScript app in `launchpad/` and compiled output is embedded via `src/channels/web/static/launchpad*.js` assets served by gateway static routes.
-- Launchpad bundle is code-split (`launchpad.js` entry + deferred `launchpad-App.js`, `launchpad-PrivyLaunchpad.js`, `launchpad-react.js`, `launchpad-privy.js`) so first paint does not block on full auth SDK parse/eval.
-- Identity boot now starts from an explicit user action (`Start Privy Sign Up`) before Privy SDK chunk hydration to reduce initial main-thread stalls on low-resource clients.
+- Launchpad bundle is emitted with hashed chunk names (`launchpad-<chunk>-<hash>.js`) to prevent stale chunk/runtime mismatches across local reloads and Railway deploys.
+- Gateway static responses for launchpad assets are served with `Cache-Control: no-store` to force fresh fetches after each deploy.
+- Identity boot starts from an explicit user action (`Sign Up / Connect Wallet`).
 - First interaction always enforces identity bootstrap: Privy signup/login + wallet binding.
 - If login completes without an embedded Ethereum wallet surfaced yet, launchpad triggers `useCreateWallet` as a deterministic fallback and blocks objective/provisioning steps until signer context is ready.
 - Wallet-only browser-provider fallback is disabled in launchpad flow; Privy identity is mandatory before objective/config/signature steps.
 - Frontend surfaces include early browser error guards for known third-party injected wallet script failures (for example `evmAsk.js` `keccak_256` null-destructure) so launchpad flow remains operational.
 - Polling status events are deduplicated and chat history is capped to prevent runaway DOM growth and UI freezes under long-running sessions.
 - User objective is collected in chat before any provisioning action.
-- Gateway calls `suggest-config` and renders a deterministic configuration summary before launch.
+- Gateway calls `suggest-config` and launchpad then requests a blueprint through the gateway OpenAI-compatible APIs (`GET /v1/models`, `POST /v1/chat/completions`) to use the active Anthropic-compatible model (for example MiniMax via Anthropic-compatible base URL) with deterministic fallback when unavailable.
+- Blueprint response includes a Mermaid graph plus markdown seed content for `IDENTITY.md` and `MISSION.md`; launchpad stores these under `config.domain_overrides` as launch-time seed artifacts.
+- Mermaid graph blocks in assistant messages are rendered into visual diagrams directly in chat (with fallback to source graph text if render fails).
+- Launchpad renders the interactive progression CTA (continue/retry) inline in the chat stream to keep the setup flow action-driven inside message context.
 - Launchpad derives and displays runtime decision (`shared` fallback posture vs `dedicated` enclave posture) before challenge/sign.
+- During `launching`/`provisioning`, launchpad switches from chat panel to a terminal-mode stream fed by timeline events (`/api/frontdoor/session/{session_id}/timeline`) and renders tagged provision logs (Railway/eCloud/provision channels) in near-real time.
 - No instance is provisioned until explicit user confirmation and successful wallet signature.
 - When session status transitions to `ready`, launchpad now auto-redirects to `instance_url` (or `verify_url` fallback). Embedded launchpad posts a redirect bridge message to parent gateway and also applies top-window fallback redirect.
 
@@ -166,6 +171,7 @@ Placeholder substitution hardening:
 - Placeholders are rendered as environment variable references before execution.
 - Runtime values are injected via process env (not raw string interpolation) to prevent shell command injection from user-supplied config fields.
 - Keep placeholders quoted in command templates when values may contain whitespace.
+- Provision command stdout/stderr lines are streamed into session timeline `provision_log` events for launchpad terminal rendering; timeline retains the latest bounded window to avoid unbounded memory growth.
 
 Example:
 

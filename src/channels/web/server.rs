@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -15,7 +16,7 @@ use axum::{
     http::{HeaderValue, StatusCode, header},
     middleware,
     response::{
-        Html, IntoResponse, Response,
+        IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
@@ -50,6 +51,7 @@ pub type PromptQueue = Arc<
 >;
 
 static WEB_STATIC_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/src/channels/web/static");
+const WEB_STATIC_FS_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/channels/web/static");
 
 /// Simple sliding-window rate limiter.
 ///
@@ -451,12 +453,12 @@ pub async fn start_server(
 
 // --- Static file handlers ---
 
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("static/index.html"))
+async fn index_handler() -> impl IntoResponse {
+    launchpad_static_asset_response("index.html")
 }
 
-async fn frontdoor_handler() -> Html<&'static str> {
-    Html(include_str!("static/launchpad.html"))
+async fn frontdoor_handler() -> impl IntoResponse {
+    launchpad_static_asset_response("launchpad.html")
 }
 
 async fn launchpad_css_handler() -> impl IntoResponse {
@@ -476,21 +478,43 @@ async fn launchpad_chunk_handler(Path(asset): Path<String>) -> impl IntoResponse
 }
 
 fn launchpad_static_asset_response(filename: &str) -> Response {
-    if let Some(file) = WEB_STATIC_DIR.get_file(filename) {
-        let content_type = mime_guess::from_path(filename)
-            .first_or_octet_stream()
-            .essence_str()
-            .to_string();
-        let mut response = Response::new(Body::from(file.contents().to_vec()));
-        let content_type_header = HeaderValue::from_str(&content_type)
-            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
-        response
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, content_type_header);
-        response
-    } else {
-        (StatusCode::NOT_FOUND, "Not found").into_response()
+    if filename.contains("..") {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
     }
+    if let Some(contents) = read_static_asset_from_fs(filename) {
+        return static_asset_bytes_response(filename, contents);
+    }
+    if let Some(file) = WEB_STATIC_DIR.get_file(filename) {
+        return static_asset_bytes_response(filename, file.contents().to_vec());
+    }
+    (StatusCode::NOT_FOUND, "Not found").into_response()
+}
+
+fn read_static_asset_from_fs(filename: &str) -> Option<Vec<u8>> {
+    let mut path = PathBuf::from(WEB_STATIC_FS_ROOT);
+    path.push(filename);
+    std::fs::read(path).ok()
+}
+
+fn static_asset_bytes_response(filename: &str, contents: Vec<u8>) -> Response {
+    let content_type = mime_guess::from_path(filename)
+        .first_or_octet_stream()
+        .essence_str()
+        .to_string();
+    let mut response = Response::new(Body::from(contents));
+    let content_type_header = HeaderValue::from_str(&content_type)
+        .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type_header);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    response
 }
 
 async fn favicon_handler() -> impl IntoResponse {
@@ -509,31 +533,19 @@ async fn legacy_gateway_redirect_handler(original_uri: OriginalUri) -> impl Into
 }
 
 async fn css_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css")],
-        include_str!("static/style.css"),
-    )
+    launchpad_static_asset_response("style.css")
 }
 
 async fn js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "application/javascript")],
-        include_str!("static/app.js"),
-    )
+    launchpad_static_asset_response("app.js")
 }
 
 async fn frontdoor_css_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css")],
-        include_str!("static/frontdoor.css"),
-    )
+    launchpad_static_asset_response("frontdoor.css")
 }
 
 async fn frontdoor_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "application/javascript")],
-        include_str!("static/frontdoor.js"),
-    )
+    launchpad_static_asset_response("frontdoor.js")
 }
 
 // --- Health ---

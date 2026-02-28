@@ -7,7 +7,9 @@
 //! 4) return redirect URL for the dedicated instance
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,6 +18,7 @@ use chrono::{DateTime, Utc};
 use k256::ecdsa::{RecoveryId, Signature as EcdsaSignature, VerifyingKey};
 use rand::{Rng, distributions::Alphanumeric};
 use sha3::{Digest, Keccak256};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::RwLock;
 use url::Url;
@@ -225,6 +228,7 @@ pub struct FrontdoorService {
 const FRONTDOOR_CURRENT_CONFIG_VERSION: u32 = 2;
 const FRONTDOOR_SUPPORTED_CONFIG_VERSIONS: [u32; 2] = [1, 2];
 const ONBOARDING_GATEWAY_AUTH_FROM_CONFIG_MARKER: &str = "__from_config__";
+const FRONTDOOR_TIMELINE_EVENT_CAP: usize = 1200;
 const FRONTDOOR_SUPPORTED_DOMAINS: [&str; 8] = [
     "general",
     "developer",
@@ -1204,6 +1208,21 @@ impl FrontdoorService {
         Some(render_funding_preflight_response(session))
     }
 
+    async fn emit_provision_log(&self, session_id: Uuid, entry: &ProvisionCommandLog) {
+        let line = entry.line.trim();
+        if line.is_empty() {
+            return;
+        }
+        let mut state = self.state.write().await;
+        let Some(session) = state.sessions.get_mut(&session_id) else {
+            return;
+        };
+        let status = session.status.as_str().to_string();
+        let detail = format!("[{}/{}] {}", entry.source, entry.stream, line);
+        push_timeline_event(session, "provision_log", &status, &detail, "provisioner");
+        session.updated_at = Utc::now();
+    }
+
     async fn run_provision(self: Arc<Self>, session_id: Uuid) {
         let (
             wallet,
@@ -1285,11 +1304,23 @@ impl FrontdoorService {
             let (result, source) = match command.as_deref().map(str::trim) {
                 Some(raw_template) if !raw_template.is_empty() => {
                     match parse_provision_command_template(raw_template) {
-                        Ok(parsed_template) => (
-                            execute_provision_command(parsed_template.as_str(), &command_input)
+                        Ok(parsed_template) => {
+                            let service = Arc::clone(&self);
+                            (
+                                execute_provision_command_with_stream(
+                                    parsed_template.as_str(),
+                                    &command_input,
+                                    move |entry| {
+                                        let service = Arc::clone(&service);
+                                        async move {
+                                            service.emit_provision_log(session_id, &entry).await;
+                                        }
+                                    },
+                                )
                                 .await,
-                            ProvisioningSource::Command,
-                        ),
+                                ProvisioningSource::Command,
+                            )
+                        }
                         Err(_template_err)
                             if allow_default_fallback && normalized_default_url.is_ok() =>
                         {
@@ -1940,6 +1971,10 @@ fn push_timeline_event(
         actor: actor.to_string(),
         created_at: Utc::now(),
     });
+    if session.timeline.len() > FRONTDOOR_TIMELINE_EVENT_CAP {
+        let overflow = session.timeline.len() - FRONTDOOR_TIMELINE_EVENT_CAP;
+        session.timeline.drain(0..overflow);
+    }
     tracing::info!(
         session_id = %session.id,
         wallet = %session.wallet_address,
@@ -2588,10 +2623,32 @@ struct ProvisionCommandInput<'a> {
     verify_base_url: Option<&'a str>,
 }
 
-async fn execute_provision_command(
+#[derive(Debug, Clone)]
+struct ProvisionCommandLog {
+    source: String,
+    stream: String,
+    line: String,
+}
+
+fn classify_provision_log_source(line: &str) -> &'static str {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("railway") {
+        "railway"
+    } else if lower.contains("ecloud")
+        || lower.contains("eigencloud")
+        || lower.contains("eigenda")
+        || lower.contains("verify-sepolia")
+    {
+        "ecloud"
+    } else {
+        "provision"
+    }
+}
+
+fn build_provision_command(
     template: &str,
     input: &ProvisionCommandInput<'_>,
-) -> Result<ProvisioningResult, String> {
+) -> Result<Command, String> {
     let config_json = serde_json::to_string(input.config)
         .map_err(|e| format!("config serialization failed: {e}"))?;
     let config_b64 =
@@ -2787,28 +2844,122 @@ async fn execute_provision_command(
     for (_, env_key, value) in &replacements {
         command.env(env_key, value);
     }
+    Ok(command)
+}
 
-    let output = command
-        .output()
-        .await
+async fn execute_provision_command_with_stream<F, Fut>(
+    template: &str,
+    input: &ProvisionCommandInput<'_>,
+    mut on_log: F,
+) -> Result<ProvisioningResult, String>
+where
+    F: FnMut(ProvisionCommandLog) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut command = build_provision_command(template, input)?;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
         .map_err(|e| format!("failed to execute provision command: {e}"))?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut stdout_lines = child.stdout.take().map(|stream| BufReader::new(stream).lines());
+    let mut stderr_lines = child.stderr.take().map(|stream| BufReader::new(stream).lines());
+    let mut stdout_complete = stdout_lines.is_none();
+    let mut stderr_complete = stderr_lines.is_none();
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+
+    while !(stdout_complete && stderr_complete) {
+        tokio::select! {
+            maybe_line = async {
+                if let Some(lines) = stdout_lines.as_mut() {
+                    lines.next_line().await
+                } else {
+                    Ok(None)
+                }
+            }, if !stdout_complete => {
+                match maybe_line {
+                    Ok(Some(line)) => {
+                        stdout.push_str(&line);
+                        stdout.push('\n');
+                        on_log(ProvisionCommandLog {
+                            source: classify_provision_log_source(&line).to_string(),
+                            stream: "stdout".to_string(),
+                            line,
+                        }).await;
+                    }
+                    Ok(None) => {
+                        stdout_complete = true;
+                    }
+                    Err(err) => {
+                        let detail = format!("stdout stream error: {err}");
+                        stderr.push_str(&detail);
+                        stderr.push('\n');
+                        on_log(ProvisionCommandLog {
+                            source: "provision".to_string(),
+                            stream: "stderr".to_string(),
+                            line: detail,
+                        }).await;
+                        stdout_complete = true;
+                    }
+                }
+            }
+            maybe_line = async {
+                if let Some(lines) = stderr_lines.as_mut() {
+                    lines.next_line().await
+                } else {
+                    Ok(None)
+                }
+            }, if !stderr_complete => {
+                match maybe_line {
+                    Ok(Some(line)) => {
+                        stderr.push_str(&line);
+                        stderr.push('\n');
+                        on_log(ProvisionCommandLog {
+                            source: classify_provision_log_source(&line).to_string(),
+                            stream: "stderr".to_string(),
+                            line,
+                        }).await;
+                    }
+                    Ok(None) => {
+                        stderr_complete = true;
+                    }
+                    Err(err) => {
+                        let detail = format!("stderr stream error: {err}");
+                        stderr.push_str(&detail);
+                        stderr.push('\n');
+                        on_log(ProvisionCommandLog {
+                            source: "provision".to_string(),
+                            stream: "stderr".to_string(),
+                            line: detail,
+                        }).await;
+                        stderr_complete = true;
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("failed waiting for provision command: {e}"))?;
+    if !status.success() {
         return Err(format!(
             "provision command failed with status {}: {}",
-            output.status,
+            status,
             stderr.trim()
         ));
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let Some(result) = execute_provision_output(&stdout, input.verify_base_url) else {
+    let result = execute_provision_output(&stdout, input.verify_base_url)
+        .or_else(|| execute_provision_output(&stderr, input.verify_base_url));
+    let Some(result) = result else {
         return Err(
             "provision command succeeded but did not return an instance url in stdout".to_string(),
         );
     };
-
     Ok(result)
 }
 

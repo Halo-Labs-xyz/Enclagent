@@ -1,11 +1,9 @@
 import React from "react";
-
-const PrivyLaunchpad = React.lazy(() => import("./PrivyLaunchpad"));
+import PrivyLaunchpad from "./PrivyLaunchpad";
 
 function App() {
   const [bootstrap, setBootstrap] = React.useState<Bootstrap | null>(null);
   const [error, setError] = React.useState<string | null>(null);
-  const [identityFlowStarted, setIdentityFlowStarted] = React.useState(false);
 
   React.useEffect(() => {
     fetch("/api/frontdoor/bootstrap")
@@ -51,44 +49,7 @@ function App() {
     );
   }
 
-  if (!identityFlowStarted) {
-    return (
-      <main className="lp-shell">
-        <section className="lp-chat-card">
-          <div className="lp-chat-head">
-            <h2>Launchpad Chat</h2>
-            <p>Step 1 required: secure identity via Privy.</p>
-          </div>
-          <div className="lp-chat-stream">
-            <div className="lp-msg assistant">
-              Welcome. First step: sign up or log in with Privy to provision your wallet identity before configuration.
-            </div>
-          </div>
-          <div className="lp-chat-actions">
-            <button
-              type="button"
-              className="lp-action-btn"
-              onClick={() => setIdentityFlowStarted(true)}
-            >
-              Start Privy Sign Up
-            </button>
-          </div>
-        </section>
-      </main>
-    );
-  }
-
-  return (
-    <React.Suspense
-      fallback={
-        <div className="lp-shell" style={{ padding: 24 }}>
-          <p className="lp-eyebrow">Initializing secure identity...</p>
-        </div>
-      }
-    >
-      <PrivyLaunchpad bootstrap={bootstrap} />
-    </React.Suspense>
-  );
+  return <PrivyLaunchpad bootstrap={bootstrap} />;
 }
 
 export interface Bootstrap {

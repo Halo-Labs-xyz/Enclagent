@@ -12,7 +12,7 @@ export default function PrivyLaunchpad({ bootstrap }: { bootstrap: Bootstrap }) 
       appId={appId}
       clientId={clientId}
       config={{
-        loginMethods: ["wallet", "email", "google"],
+        loginMethods: ["wallet", "email"],
         embeddedWallets: {
           ethereum: { createOnLogin: "users-without-wallets" },
         },

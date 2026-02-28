@@ -1423,6 +1423,7 @@ async fn main() -> anyhow::Result<()> {
     let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone());
+        gw = gw.with_llm_provider(Arc::clone(&llm));
         if let Some(ref ws) = workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }

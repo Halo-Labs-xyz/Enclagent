@@ -20,29 +20,20 @@ function cleanLaunchpadAssets() {
 
 export default defineConfig({
   plugins: [cleanLaunchpadAssets(), react()],
+  define: {
+    global: "globalThis",
+  },
   build: {
-    modulePreload: false,
     outDir: resolve(__dirname, "../src/channels/web/static"),
     emptyOutDir: false,
     rollupOptions: {
       input: resolve(__dirname, "launchpad.html"),
       output: {
         entryFileNames: "launchpad.js",
-        chunkFileNames: "launchpad-[name].js",
+        chunkFileNames: "launchpad-[name]-[hash].js",
         inlineDynamicImports: false,
         assetFileNames: (info) =>
           info.name?.endsWith(".css") ? "launchpad-app.css" : "launchpad.[ext]",
-        manualChunks: (id) => {
-          if (
-            id.includes("/react-dom/") ||
-            id.includes("/react/") ||
-            id.includes("/scheduler/")
-          ) {
-            return undefined;
-          }
-          if (id.includes("node_modules")) return "privy";
-          return undefined;
-        },
       },
     },
     sourcemap: false,
