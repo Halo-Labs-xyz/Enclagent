@@ -517,6 +517,62 @@ try {
 ' "$source_repo_url" "$source_commit"
 }
 
+build_id_matches_expected_source() {
+  local build_id="$1"
+  local status_json
+  local expected_repo
+  local expected_commit
+  local actual_repo
+  local actual_commit
+
+  if [[ -z "$build_id" ]]; then
+    return 1
+  fi
+  if [[ -z "$source_repo_url" || -z "$source_commit" ]]; then
+    return 0
+  fi
+
+  status_json="$(ecloud compute build status "$build_id" --environment "$env_name" --json 2>/dev/null || true)"
+  if [[ -z "$status_json" ]]; then
+    return 0
+  fi
+
+  expected_repo="$(printf '%s' "$source_repo_url" | tr '[:upper:]' '[:lower:]' | sed -E 's/\.git$//' | sed -E 's#/*$##')"
+  expected_commit="$(printf '%s' "$source_commit" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  actual_repo="$(printf '%s' "$status_json" | node -e '
+const raw = require("fs").readFileSync(0, "utf8");
+try {
+  const parsed = JSON.parse(raw);
+  const repo = String(parsed.repoUrl || "")
+    .toLowerCase()
+    .replace(/\.git$/i, "")
+    .replace(/\/+$/g, "");
+  process.stdout.write(repo);
+} catch (_err) {
+  process.exit(0);
+}
+')"
+  actual_commit="$(printf '%s' "$status_json" | node -e '
+const raw = require("fs").readFileSync(0, "utf8");
+try {
+  const parsed = JSON.parse(raw);
+  process.stdout.write(String(parsed.gitRef || "").toLowerCase().trim());
+} catch (_err) {
+  process.exit(0);
+}
+')"
+
+  if [[ -z "$actual_repo" || -z "$actual_commit" ]]; then
+    return 0
+  fi
+  if [[ "$actual_repo" == "$expected_repo" && "$actual_commit" == "$expected_commit" ]]; then
+    return 0
+  fi
+
+  log_phase "eigencloud build source mismatch build_id=${build_id} expected_repo=${expected_repo} expected_commit=${expected_commit} actual_repo=${actual_repo} actual_commit=${actual_commit}"
+  return 1
+}
+
 wait_for_build_terminal_state() {
   local build_id="$1"
   local timeout_secs="$2"
@@ -671,15 +727,22 @@ while true; do
       active_build_id="$(resolve_active_build_id_from_queue)"
     fi
     if [[ -n "$active_build_id" ]]; then
+      active_build_matches_expected=1
+      if ! build_id_matches_expected_source "$active_build_id"; then
+        active_build_matches_expected=0
+      fi
       wait_for_build_terminal_state "$active_build_id" "$remaining_retry_budget"
       wait_result=$?
       if (( wait_result == 0 )); then
         deploy_attempt=$((deploy_attempt + 1))
         continue
       elif (( wait_result == 2 )); then
-        echo "$deploy_output" >&2
-        echo "error: eigencloud build ${active_build_id} failed; aborting deploy retry loop" >&2
-        exit 1
+        if (( active_build_matches_expected == 1 )); then
+          echo "$deploy_output" >&2
+          echo "error: eigencloud build ${active_build_id} failed; aborting deploy retry loop" >&2
+          exit 1
+        fi
+        echo "warning: queued build ${active_build_id} failed but source does not match requested repo/commit; continuing deploy retries" >&2
       fi
     fi
 
