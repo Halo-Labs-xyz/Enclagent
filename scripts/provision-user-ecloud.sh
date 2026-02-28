@@ -458,6 +458,164 @@ try {
   fi
 }
 
+extract_build_id_from_text() {
+  node -e '
+const raw = String(process.argv[1] || "");
+const patterns = [
+  /\/builds\/([0-9a-fA-F-]{36})\b/,
+  /\bbuild[_ -]?id[=: ]+([0-9a-fA-F-]{36})\b/i
+];
+for (const pattern of patterns) {
+  const match = raw.match(pattern);
+  if (match && match[1]) {
+    process.stdout.write(match[1].toLowerCase());
+    process.exit(0);
+  }
+}
+' "$1"
+}
+
+resolve_active_build_id_from_queue() {
+  local build_json
+  build_json="$(ecloud compute build list --environment "$env_name" --limit 20 --json 2>/dev/null || true)"
+  if [[ -z "$build_json" ]]; then
+    return
+  fi
+
+  printf '%s' "$build_json" | node -e '
+const raw = require("fs").readFileSync(0, "utf8");
+const sourceRepo = String(process.argv[1] || "").replace(/\.git$/i, "").toLowerCase();
+const sourceCommit = String(process.argv[2] || "").toLowerCase();
+const activeStatuses = new Set([
+  "building",
+  "queued",
+  "pending",
+  "running",
+  "created",
+  "starting",
+  "submitted",
+  "in_progress"
+]);
+const normalizeRepo = (value) => String(value || "").replace(/\.git$/i, "").toLowerCase();
+try {
+  const parsed = JSON.parse(raw);
+  const builds = Array.isArray(parsed) ? parsed : [];
+  const matching = builds.find((item) => {
+    const status = String(item.status || "").toLowerCase();
+    if (!activeStatuses.has(status)) return false;
+    if (sourceRepo && normalizeRepo(item.repoUrl) !== sourceRepo) return false;
+    if (sourceCommit && String(item.gitRef || "").toLowerCase() !== sourceCommit) return false;
+    return true;
+  });
+  const fallback = builds.find((item) => activeStatuses.has(String(item.status || "").toLowerCase()));
+  const chosen = matching || fallback;
+  if (!chosen || !chosen.buildId) process.exit(0);
+  process.stdout.write(String(chosen.buildId).toLowerCase());
+} catch (_err) {
+  process.exit(0);
+}
+' "$source_repo_url" "$source_commit"
+}
+
+wait_for_build_terminal_state() {
+  local build_id="$1"
+  local timeout_secs="$2"
+  local poll_secs_raw="${ECLOUD_FRONTDOOR_BUILD_STATUS_POLL_SECS:-15}"
+  local poll_secs="$poll_secs_raw"
+  local started_at
+  local last_status=""
+  local status_json
+  local build_status
+  local status_context
+  local status_error
+
+  if [[ -z "$build_id" || -z "$timeout_secs" ]]; then
+    return 1
+  fi
+  if [[ ! "$poll_secs" =~ ^[0-9]+$ ]] || (( poll_secs < 5 )); then
+    poll_secs=15
+  fi
+  if (( timeout_secs < 1 )); then
+    return 1
+  fi
+
+  started_at="$(date +%s)"
+  log_phase "eigencloud build wait start build_id=${build_id} timeout_secs=${timeout_secs}"
+  while true; do
+    status_json="$(ecloud compute build status "$build_id" --environment "$env_name" --json 2>/dev/null || true)"
+    build_status="$(printf '%s' "$status_json" | node -e '
+const raw = require("fs").readFileSync(0, "utf8");
+try {
+  const parsed = JSON.parse(raw);
+  process.stdout.write(String(parsed.status || "").toLowerCase());
+} catch (_err) {
+  process.exit(0);
+}
+')"
+    status_context="$(printf '%s' "$status_json" | node -e '
+const raw = require("fs").readFileSync(0, "utf8");
+try {
+  const parsed = JSON.parse(raw);
+  const status = String(parsed.status || "").toLowerCase();
+  const repo = String(parsed.repoUrl || "").replace(/\.git$/i, "");
+  const gitRef = String(parsed.gitRef || "");
+  const createdAt = String(parsed.createdAt || "");
+  const updatedAt = String(parsed.updatedAt || "");
+  const parts = [
+    status ? `status=${status}` : "",
+    repo ? `repo=${repo}` : "",
+    gitRef ? `git_ref=${gitRef}` : "",
+    createdAt ? `created_at=${createdAt}` : "",
+    updatedAt ? `updated_at=${updatedAt}` : ""
+  ].filter(Boolean);
+  process.stdout.write(parts.join(" "));
+} catch (_err) {
+  process.exit(0);
+}
+')"
+    status_error="$(printf '%s' "$status_json" | node -e '
+const raw = require("fs").readFileSync(0, "utf8");
+try {
+  const parsed = JSON.parse(raw);
+  process.stdout.write(String(parsed.errorMessage || ""));
+} catch (_err) {
+  process.exit(0);
+}
+')"
+
+    if [[ -z "$build_status" ]]; then
+      log_phase "eigencloud build wait build_id=${build_id} status=unknown (status lookup unavailable)"
+    elif [[ "$build_status" != "$last_status" ]]; then
+      log_phase "eigencloud build wait build_id=${build_id} ${status_context}"
+      last_status="$build_status"
+    fi
+
+    case "$build_status" in
+      success|succeeded|completed)
+        log_phase "eigencloud build wait complete build_id=${build_id} status=${build_status}"
+        return 0
+        ;;
+      failed|error|canceled|cancelled|aborted|timed_out|timeout)
+        if [[ -n "$status_error" ]]; then
+          log_phase "eigencloud build wait failed build_id=${build_id} status=${build_status} error=${status_error}"
+        else
+          log_phase "eigencloud build wait failed build_id=${build_id} status=${build_status}"
+        fi
+        return 2
+        ;;
+    esac
+
+    now="$(date +%s)"
+    elapsed=$((now - started_at))
+    if (( elapsed >= timeout_secs )); then
+      log_phase "eigencloud build wait timeout build_id=${build_id} elapsed=${elapsed}s timeout=${timeout_secs}s"
+      return 1
+    fi
+
+    sleep "$poll_secs"
+  done
+}
+
 log_phase "eigencloud provisioning started env=${env_name} ironclaw_profile=${profile_name} session=${session}"
 if [[ -n "$source_repo_url" && -n "$source_commit" ]]; then
   log_phase "eigencloud verifiable source repo=${source_repo_url} commit=${source_commit}"
@@ -501,6 +659,30 @@ while true; do
       exit 1
     fi
 
+    remaining_retry_budget=$((deploy_retry_timeout_raw - retry_elapsed))
+    if (( remaining_retry_budget < 1 )); then
+      echo "$deploy_output" >&2
+      echo "error: deploy retry budget exhausted before build wait (elapsed=${retry_elapsed}s/${deploy_retry_timeout_raw}s)" >&2
+      exit 1
+    fi
+
+    active_build_id="$(extract_build_id_from_text "$deploy_output")"
+    if [[ -z "$active_build_id" ]]; then
+      active_build_id="$(resolve_active_build_id_from_queue)"
+    fi
+    if [[ -n "$active_build_id" ]]; then
+      wait_for_build_terminal_state "$active_build_id" "$remaining_retry_budget"
+      wait_result=$?
+      if (( wait_result == 0 )); then
+        deploy_attempt=$((deploy_attempt + 1))
+        continue
+      elif (( wait_result == 2 )); then
+        echo "$deploy_output" >&2
+        echo "error: eigencloud build ${active_build_id} failed; aborting deploy retry loop" >&2
+        exit 1
+      fi
+    fi
+
     if (( deploy_max_retries_raw > 0 && deploy_attempt >= deploy_max_retries_raw )); then
       echo "$deploy_output" >&2
       echo "error: deploy retry attempts exceeded (${deploy_attempt}/${deploy_max_retries_raw}) reason=${retry_reason}" >&2
@@ -508,7 +690,6 @@ while true; do
     fi
 
     sleep_seconds="$deploy_retry_backoff_raw"
-    remaining_retry_budget=$((deploy_retry_timeout_raw - retry_elapsed))
     if (( sleep_seconds > remaining_retry_budget )); then
       sleep_seconds="$remaining_retry_budget"
     fi

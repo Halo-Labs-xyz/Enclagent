@@ -196,8 +196,10 @@ The bundled provisioner script also:
 - Applies runtime/wallet env overrides from frontdoor config before deploy.
 - Carries forward base runtime/LLM env (`DATABASE_*`, `LLM_BACKEND`, `ANTHROPIC_*`, etc.) from the frontdoor service process so per-session instances do not inherit template placeholders.
 - Uses non-interactive deploy mode. Set `ECLOUD_FRONTDOOR_FORCE_VERIFIABLE=true` to require `--verifiable` image/source checks during app deploy.
+- Uses a slim verifiable runtime build profile (`Dockerfile.ecloud`: `--no-default-features --features libsql`) so EigenCloud source builds match the enclave runtime database mode and remain under upstream build-duration limits.
 - Retries verifiable deploy on EigenCloud throttling/queue conflicts (`429 Too Many Requests`, `409 build already in progress`) using queue-safe fixed backoff with bounded retry budget (defaults: `ECLOUD_FRONTDOOR_DEPLOY_MAX_RETRIES=24`, `ECLOUD_FRONTDOOR_DEPLOY_RETRY_BACKOFF_SECS=15`, `ECLOUD_FRONTDOOR_DEPLOY_RETRY_TIMEOUT_SECS=900`; set `ECLOUD_FRONTDOOR_DEPLOY_MAX_RETRIES=0` to disable attempt-cap and rely on timeout budget only).
 - On `409` queue conflicts, the provisioner emits explicit EigenCloud build-queue context (`status`, `build_id`, `repo`, `git_ref`, timestamps) to timeline logs so operators can correlate frontdoor retries to the currently active upstream verifiable build.
+- When a queue/throttle response references an in-flight `build_id`, the provisioner waits on that build status (instead of repeatedly re-submitting) and only retries app deploy after the build reaches terminal state.
 - When verifiable mode is enabled, set `ECLOUD_FRONTDOOR_SOURCE_REPO_URL` + `ECLOUD_FRONTDOOR_SOURCE_COMMIT` so EigenCloud provenance points to the correct GitHub source.
 - Falls back to verify portal URL when direct gateway health/import seeding fails; set `ECLOUD_FRONTDOOR_STRICT_INSTANCE_INIT=true` to fail hard instead.
 - Returns `app_url` when available so frontdoor can surface distinct runtime/app/verify links instead of duplicating verify URLs.
