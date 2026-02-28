@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Enclagent Launchpad</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/launchpad.css">
+  <script>
+    (function () {
+      function isKnownWalletExtensionNoise(message, stack) {
+        var msg = String(message || "");
+        var trace = String(stack || "");
+        return (
+          msg.indexOf("Cannot redefine property: ethereum") !== -1 ||
+          msg.indexOf("Cannot destructure property 'keccak_256'") !== -1 ||
+          trace.indexOf("evmAsk.js") !== -1
+        );
+      }
+      window.addEventListener("error", function (event) {
+        if (!event) return;
+        if (!isKnownWalletExtensionNoise(event.message, event.error && event.error.stack)) return;
+        event.preventDefault();
+      }, true);
+      window.addEventListener("unhandledrejection", function (event) {
+        if (!event) return;
+        var reason = event.reason || {};
+        if (!isKnownWalletExtensionNoise(reason.message, reason.stack)) return;
+        event.preventDefault();
+      });
+    })();
+  </script>
+  <script>
+    (function () {
+      var params = new URLSearchParams(window.location.search);
+      if (params.get("privy_oauth_callback") !== "1" || !window.opener) return;
+      window.opener.postMessage({
+        source: "enclagent:privy_oauth_callback",
+        code: String(params.get("code") || ""),
+        state: String(params.get("state") || ""),
+        error: String(params.get("error") || params.get("error_description") || ""),
+      }, window.location.origin);
+      try { document.body.innerHTML = '<main style="font-family:sans-serif;padding:24px;">Authentication complete. You can close this window.</main>'; } catch (_) {}
+      setTimeout(function () { window.close(); }, 80);
+    })();
+  </script>
+</head>
+<body>
+  <div id="root">
+    <p class="lp-eyebrow" style="padding:24px;color:#20d2ff;">Loading launchpad…</p>
+  </div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+</html>

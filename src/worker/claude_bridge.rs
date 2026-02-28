@@ -37,6 +37,11 @@ use uuid::Uuid;
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, PromptResponse, WorkerHttpClient};
 
+/// Cap forwarded stderr lines so noisy tools cannot flood gateway/system streams.
+const STDERR_STATUS_FORWARD_LIMIT: usize = 40;
+/// Cap line length for forwarded stderr entries.
+const STDERR_STATUS_LINE_MAX_LEN: usize = 400;
+
 /// Configuration for the Claude bridge runtime.
 pub struct ClaudeBridgeConfig {
     pub job_id: Uuid,
@@ -352,7 +357,6 @@ impl ClaudeBridgeRuntime {
             .arg(prompt)
             .arg("--output-format")
             .arg("stream-json")
-            .arg("--verbose")
             .arg("--max-turns")
             .arg(self.config.max_turns.to_string())
             .arg("--model")
@@ -388,17 +392,45 @@ impl ClaudeBridgeRuntime {
                 reason: "failed to capture claude stderr".to_string(),
             })?;
 
-        // Spawn stderr reader that forwards lines as log events
+        // Spawn stderr reader with strict flood protection.
         let client_for_stderr = Arc::clone(&self.client);
         let job_id = self.config.job_id;
         let stderr_handle = tokio::spawn(async move {
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
+            let mut forwarded = 0usize;
+            let mut suppressed = 0usize;
             while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(job_id = %job_id, "claude stderr: {}", line);
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                // Keep low-level observability without overwhelming normal logs.
+                tracing::trace!(job_id = %job_id, "claude stderr: {}", line);
+
+                if forwarded < STDERR_STATUS_FORWARD_LIMIT {
+                    let payload = JobEventPayload {
+                        event_type: "status".to_string(),
+                        data: serde_json::json!({
+                            "message": truncate(&line, STDERR_STATUS_LINE_MAX_LEN),
+                        }),
+                    };
+                    client_for_stderr.post_event(&payload).await;
+                    forwarded += 1;
+                } else {
+                    suppressed += 1;
+                }
+            }
+
+            if suppressed > 0 {
                 let payload = JobEventPayload {
                     event_type: "status".to_string(),
-                    data: serde_json::json!({ "message": line }),
+                    data: serde_json::json!({
+                        "message": format!(
+                            "Suppressed {} additional Claude stderr lines to prevent log flooding",
+                            suppressed
+                        ),
+                    }),
                 };
                 client_for_stderr.post_event(&payload).await;
             }

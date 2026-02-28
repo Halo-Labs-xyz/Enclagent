@@ -8,6 +8,45 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Sora:wght@500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/frontdoor.css">
+  <script>
+    (function () {
+      function shouldSuppress(source, message) {
+        var src = String(source || "");
+        var msg = String(message || "");
+        return (
+          src.indexOf("evmAsk.js") !== -1 ||
+          msg.indexOf("Cannot destructure property 'keccak_256'") !== -1 ||
+          msg.indexOf("StorageType.persistent is deprecated") !== -1 ||
+          msg.indexOf("Please use standardized navigator.storage") !== -1
+        );
+      }
+
+      window.addEventListener("error", function (event) {
+        if (shouldSuppress(event && event.filename, event && event.message)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+
+      window.addEventListener("unhandledrejection", function (event) {
+        var reason = event && event.reason;
+        var message = reason && reason.message ? reason.message : String(reason || "");
+        if (shouldSuppress("", message)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      }, true);
+
+      var originalWarn = console.warn;
+      console.warn = function () {
+        var message = Array.prototype.map.call(arguments, function (part) {
+          return String(part == null ? "" : part);
+        }).join(" ");
+        if (shouldSuppress("", message)) return;
+        return originalWarn.apply(console, arguments);
+      };
+    })();
+  </script>
 </head>
 <body>
   <div class="bg-grid"></div>

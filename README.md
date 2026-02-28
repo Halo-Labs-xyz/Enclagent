@@ -76,6 +76,11 @@ The embedded gateway serves the canonical frontdoor endpoints:
 - `GET /api/frontdoor/sessions?wallet_address=<0x...>&limit=<n>`
 
 Static frontdoor assets are under `src/channels/web/static/`.
+The launchpad is a TypeScript React app in `launchpad/`. Build it before `cargo build`:
+
+```bash
+npm run build:launchpad
+```
 
 ## Validation
 

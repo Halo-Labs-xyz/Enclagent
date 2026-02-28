@@ -2,6 +2,7 @@
   "name": "enclagent-dev-tools",
   "private": true,
   "scripts": {
-    "lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings && node --check src/channels/web/static/frontdoor.js && node --check src/channels/web/static/app.js"
+    "lint": "cargo clippy --workspace --all-targets --all-features -- -D warnings && node --check src/channels/web/static/frontdoor.js && node --check src/channels/web/static/app.js",
+    "build:launchpad": "cd launchpad && npm install && npm run build"
   }
 }

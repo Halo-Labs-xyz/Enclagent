@@ -52,8 +52,9 @@ Configure one provisioning path:
 ## Identity Entry Requirements
 
 - Current frontdoor UI provides a single Privy connect button with provider chooser semantics (`wallet`, `email`, social OAuth providers) and enforces wallet binding before launch.
+- Privy provider config enables Ethereum embedded wallet auto-creation for users without wallets (`embeddedWallets.ethereum.createOnLogin=users-without-wallets`).
 - Wallet connect remains non-SIWE for frontdoor challenge flow: users connect injected EVM wallet, then complete the gateway gasless authorization challenge signature.
-- Email/social entry paths authenticate through Privy (email OTP or OAuth) and must converge on wallet binding before provisioning is allowed.
+- Email/social entry paths authenticate through Privy (email OTP or OAuth) and converge on embedded wallet provisioning before provisioning is allowed.
 - Launchpad now binds signing provider from Privy wallet state first (`useWallets`/`getEthereumProvider`) and only falls back to `window.ethereum` when Privy wallet provider is unavailable.
 - When `privy_app_id` is present, connect flow initializes Privy client before provider execution so identity paths are deterministic.
 - When `GATEWAY_FRONTDOOR_REQUIRE_PRIVY=true`, bootstrap requires resolved `privy_app_id`; launch is blocked if missing.
@@ -93,11 +94,19 @@ Configure one provisioning path:
 ### Chat-First Launchpad UX (Current)
 
 - `/frontdoor` now serves a simplified chat-first launchpad surface.
+- Launchpad UI source-of-truth is the TypeScript app in `launchpad/` and compiled output is embedded via `src/channels/web/static/launchpad*.js` assets served by gateway static routes.
+- Launchpad bundle is code-split (`launchpad.js` entry + deferred `launchpad-App.js`, `launchpad-PrivyLaunchpad.js`, `launchpad-react.js`, `launchpad-privy.js`) so first paint does not block on full auth SDK parse/eval.
+- Identity boot now starts from an explicit user action (`Start Privy Sign Up`) before Privy SDK chunk hydration to reduce initial main-thread stalls on low-resource clients.
 - First interaction always enforces identity bootstrap: Privy signup/login + wallet binding.
+- If login completes without an embedded Ethereum wallet surfaced yet, launchpad triggers `useCreateWallet` as a deterministic fallback and blocks objective/provisioning steps until signer context is ready.
+- Wallet-only browser-provider fallback is disabled in launchpad flow; Privy identity is mandatory before objective/config/signature steps.
+- Frontend surfaces include early browser error guards for known third-party injected wallet script failures (for example `evmAsk.js` `keccak_256` null-destructure) so launchpad flow remains operational.
+- Polling status events are deduplicated and chat history is capped to prevent runaway DOM growth and UI freezes under long-running sessions.
 - User objective is collected in chat before any provisioning action.
 - Gateway calls `suggest-config` and renders a deterministic configuration summary before launch.
 - Launchpad derives and displays runtime decision (`shared` fallback posture vs `dedicated` enclave posture) before challenge/sign.
 - No instance is provisioned until explicit user confirmation and successful wallet signature.
+- When session status transitions to `ready`, launchpad now auto-redirects to `instance_url` (or `verify_url` fallback). Embedded launchpad posts a redirect bridge message to parent gateway and also applies top-window fallback redirect.
 
 ## Funding + Dedicated Provisioning Requirements
 

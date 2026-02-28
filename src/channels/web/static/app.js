@@ -105,20 +105,21 @@ function authenticate() {
     token = '';
   }
 
-  // Test request before opening app surfaces.
+  // Frontdoor mode: bootstrap already confirmed gateway is reachable; skip probe.
+  if (frontdoorModeEnabled) {
+    sessionStorage.removeItem('enclagent_token');
+    startGatewayApp('launchpad');
+    return;
+  }
+
+  // Test request before opening app surfaces (token auth mode).
   apiFetch('/api/chat/threads')
     .then(() => {
-      if (gatewayRequiresAuth) {
-        sessionStorage.setItem('enclagent_token', token);
-      } else {
-        sessionStorage.removeItem('enclagent_token');
-      }
-      const defaultTab = frontdoorModeEnabled ? 'launchpad' : 'chat';
-      startGatewayApp(defaultTab);
+      sessionStorage.setItem('enclagent_token', token);
+      startGatewayApp('chat');
     })
     .catch(() => {
-      const message = gatewayRequiresAuth ? 'Invalid token' : 'Gateway bootstrap failed';
-      handleAuthFailure(message);
+      handleAuthFailure('Invalid token');
     });
 }
 
@@ -155,6 +156,12 @@ function initializeGatewayMode() {
     .then((bootstrap) => {
       frontdoorModeEnabled = !!(bootstrap && bootstrap.enabled);
       gatewayRequiresAuth = !frontdoorModeEnabled;
+      if (frontdoorModeEnabled) {
+        if (window.self === window.top && !/^\/frontdoor(\?|$)/.test(window.location.pathname)) {
+          window.location.replace('/frontdoor');
+          return;
+        }
+      }
       setLaunchpadVisibility(frontdoorModeEnabled);
       if (frontdoorModeEnabled) {
         authenticate();
@@ -175,6 +182,29 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
 });
 
 initializeGatewayMode();
+
+window.addEventListener('message', (event) => {
+  if (!event || event.origin !== window.location.origin) {
+    return;
+  }
+  const data = event.data;
+  if (!data || data.source !== 'enclagent:launchpad') {
+    return;
+  }
+  if (data.type !== 'session_ready_redirect') {
+    return;
+  }
+
+  const url = typeof data.url === 'string' ? data.url.trim() : '';
+  if (!url) {
+    return;
+  }
+  if (!/^https?:\/\//i.test(url) && !url.startsWith('/')) {
+    return;
+  }
+
+  window.location.assign(url);
+});
 
 function tokenFromHash() {
   const rawHash = String(window.location.hash || '');

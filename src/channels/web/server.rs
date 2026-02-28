@@ -9,16 +9,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
+    body::Body,
     Json, Router,
     extract::{DefaultBodyLimit, OriginalUri, Path, Query, State, WebSocketUpgrade},
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     middleware,
     response::{
-        Html, IntoResponse,
+        Html, IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
 };
+use include_dir::{Dir, include_dir};
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
@@ -46,6 +48,8 @@ pub type PromptQueue = Arc<
         >,
     >,
 >;
+
+static WEB_STATIC_DIR: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/src/channels/web/static");
 
 /// Simple sliding-window rate limiter.
 ///
@@ -370,9 +374,11 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/gateway", get(legacy_gateway_redirect_handler))
         .route("/frontdoor", get(frontdoor_handler))
+        .route("/launchpad", get(frontdoor_handler))
         .route("/favicon.ico", get(favicon_handler))
         .route("/launchpad.css", get(launchpad_css_handler))
         .route("/launchpad.js", get(launchpad_js_handler))
+        .route("/launchpad-{asset}", get(launchpad_chunk_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
         .route("/frontdoor.css", get(frontdoor_css_handler))
@@ -454,17 +460,37 @@ async fn frontdoor_handler() -> Html<&'static str> {
 }
 
 async fn launchpad_css_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/css")],
-        include_str!("static/launchpad.css"),
-    )
+    launchpad_static_asset_response("launchpad.css")
 }
 
 async fn launchpad_js_handler() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "application/javascript")],
-        include_str!("static/launchpad.js"),
-    )
+    launchpad_static_asset_response("launchpad.js")
+}
+
+async fn launchpad_chunk_handler(Path(asset): Path<String>) -> impl IntoResponse {
+    let filename = format!("launchpad-{asset}");
+    if !filename.ends_with(".js") && !filename.ends_with(".css") && !filename.ends_with(".map") {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    launchpad_static_asset_response(&filename)
+}
+
+fn launchpad_static_asset_response(filename: &str) -> Response {
+    if let Some(file) = WEB_STATIC_DIR.get_file(filename) {
+        let content_type = mime_guess::from_path(filename)
+            .first_or_octet_stream()
+            .essence_str()
+            .to_string();
+        let mut response = Response::new(Body::from(file.contents().to_vec()));
+        let content_type_header = HeaderValue::from_str(&content_type)
+            .unwrap_or_else(|_| HeaderValue::from_static("application/octet-stream"));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type_header);
+        response
+    } else {
+        (StatusCode::NOT_FOUND, "Not found").into_response()
+    }
 }
 
 async fn favicon_handler() -> impl IntoResponse {
