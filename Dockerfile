@@ -24,7 +24,7 @@ COPY migrations/ migrations/
 COPY wit/ wit/
 COPY benchmarks/ benchmarks/
 
-RUN cargo build --release --locked --package enclagent --bin enclagent --no-default-features --features libsql
+RUN cargo build --profile ecloud --locked --package enclagent --bin enclagent --no-default-features --features libsql
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -49,7 +49,7 @@ RUN arch="$(dpkg --print-architecture)" \
 
 RUN npm install -g @layr-labs/ecloud-cli@0.3.3
 
-COPY --from=builder /app/target/release/enclagent /usr/local/bin/enclagent
+COPY --from=builder /app/target/ecloud/enclagent /usr/local/bin/enclagent
 COPY --from=builder /app/migrations /app/migrations
 COPY scripts/provision-user-ecloud.sh /app/scripts/provision-user-ecloud.sh
 COPY deploy/ecloud-instance.env /app/deploy/ecloud-instance.env

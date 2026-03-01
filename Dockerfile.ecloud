@@ -14,7 +14,7 @@ COPY migrations/ migrations/
 COPY wit/ wit/
 COPY benchmarks/ benchmarks/
 
-RUN cargo build --release --locked --package enclagent --bin enclagent --no-default-features --features libsql
+RUN cargo build --profile ecloud --locked --package enclagent --bin enclagent --no-default-features --features libsql
 
 FROM --platform=linux/amd64 debian:bookworm-slim
 
@@ -25,7 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-COPY --from=builder /app/target/release/enclagent /usr/local/bin/enclagent
+COPY --from=builder /app/target/ecloud/enclagent /usr/local/bin/enclagent
 COPY --from=builder /app/migrations /app/migrations
 COPY deploy /app/deploy
 COPY scripts /app/scripts
