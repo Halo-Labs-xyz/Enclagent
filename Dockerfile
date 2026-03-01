@@ -24,7 +24,7 @@ COPY migrations/ migrations/
 COPY wit/ wit/
 COPY benchmarks/ benchmarks/
 
-RUN cargo build --release --bin enclagent
+RUN cargo build --release --locked --package enclagent --bin enclagent --no-default-features --features libsql
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
