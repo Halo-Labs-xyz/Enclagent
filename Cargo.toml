@@ -174,8 +174,8 @@ lto = "thin"
 
 [profile.ecloud]
 inherits = "release"
-opt-level = 1
-codegen-units = 256
+opt-level = 0
+codegen-units = 512
 lto = false
 debug = false
 strip = "symbols"
