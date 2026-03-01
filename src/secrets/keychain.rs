@@ -20,9 +20,17 @@
 use crate::secrets::SecretError;
 
 /// Service name for keychain entries.
+#[cfg(any(
+    all(target_os = "macos", feature = "system-keyring"),
+    all(target_os = "linux", feature = "system-keyring")
+))]
 const SERVICE_NAME: &str = "enclagent";
 
 /// Account name for the master key.
+#[cfg(any(
+    all(target_os = "macos", feature = "system-keyring"),
+    all(target_os = "linux", feature = "system-keyring")
+))]
 const MASTER_KEY_ACCOUNT: &str = "master_key";
 
 /// Generate a random 32-byte master key.
@@ -43,7 +51,7 @@ pub fn generate_master_key_hex() -> String {
 // macOS implementation using security-framework
 // ============================================================================
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "system-keyring"))]
 mod platform {
     use security_framework::passwords::{
         delete_generic_password, get_generic_password, set_generic_password,
@@ -90,7 +98,7 @@ mod platform {
 // Linux implementation using secret-service
 // ============================================================================
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "system-keyring"))]
 mod platform {
     use secret_service::{EncryptionType, SecretService};
 
@@ -229,7 +237,10 @@ mod platform {
 // Fallback for unsupported platforms
 // ============================================================================
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(
+    all(target_os = "macos", feature = "system-keyring"),
+    all(target_os = "linux", feature = "system-keyring")
+)))]
 mod platform {
     use super::*;
 
@@ -260,6 +271,10 @@ mod platform {
 pub use platform::{delete_master_key, get_master_key, has_master_key, store_master_key};
 
 /// Parse a hex string to bytes.
+#[cfg(any(
+    all(target_os = "macos", feature = "system-keyring"),
+    all(target_os = "linux", feature = "system-keyring")
+))]
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, SecretError> {
     if !hex.len().is_multiple_of(2) {
         return Err(SecretError::KeychainError(
