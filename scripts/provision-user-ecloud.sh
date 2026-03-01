@@ -727,22 +727,19 @@ while true; do
       active_build_id="$(resolve_active_build_id_from_queue)"
     fi
     if [[ -n "$active_build_id" ]]; then
-      active_build_matches_expected=1
       if ! build_id_matches_expected_source "$active_build_id"; then
-        active_build_matches_expected=0
-      fi
-      wait_for_build_terminal_state "$active_build_id" "$remaining_retry_budget"
-      wait_result=$?
-      if (( wait_result == 0 )); then
-        deploy_attempt=$((deploy_attempt + 1))
-        continue
-      elif (( wait_result == 2 )); then
-        if (( active_build_matches_expected == 1 )); then
+        echo "warning: queued build ${active_build_id} does not match requested source provenance; skipping wait and retrying deploy" >&2
+      else
+        wait_for_build_terminal_state "$active_build_id" "$remaining_retry_budget"
+        wait_result=$?
+        if (( wait_result == 0 )); then
+          deploy_attempt=$((deploy_attempt + 1))
+          continue
+        elif (( wait_result == 2 )); then
           echo "$deploy_output" >&2
           echo "error: eigencloud build ${active_build_id} failed; aborting deploy retry loop" >&2
           exit 1
         fi
-        echo "warning: queued build ${active_build_id} failed but source does not match requested repo/commit; continuing deploy retries" >&2
       fi
     fi
 
