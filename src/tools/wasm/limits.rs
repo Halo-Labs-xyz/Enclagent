@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "wasm-runtime")]
 use wasmtime::ResourceLimiter;
 
 /// Default memory limit: 10 MB (conservative for untrusted code).
@@ -66,11 +67,13 @@ pub struct WasmResourceLimiter {
     /// Current memory usage (tracked across all memories).
     memory_used: u64,
     /// Maximum tables allowed.
+    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
     max_tables: u32,
     /// Current table count.
     #[allow(dead_code)] // Reserved for table limit enforcement
     tables_created: u32,
     /// Maximum instances allowed.
+    #[cfg_attr(not(feature = "wasm-runtime"), allow(dead_code))]
     max_instances: u32,
     /// Current instance count.
     #[allow(dead_code)] // Reserved for instance limit enforcement
@@ -104,6 +107,7 @@ impl WasmResourceLimiter {
     }
 }
 
+#[cfg(feature = "wasm-runtime")]
 impl ResourceLimiter for WasmResourceLimiter {
     fn memory_growing(
         &mut self,
@@ -207,6 +211,7 @@ mod tests {
         DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,
         WasmResourceLimiter,
     };
+    #[cfg(feature = "wasm-runtime")]
     use wasmtime::ResourceLimiter;
 
     #[test]
@@ -230,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-runtime")]
     fn test_resource_limiter_allows_growth_within_limit() {
         let mut limiter = WasmResourceLimiter::new(10 * 1024 * 1024);
 
@@ -240,6 +246,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "wasm-runtime")]
     fn test_resource_limiter_denies_growth_beyond_limit() {
         let mut limiter = WasmResourceLimiter::new(10 * 1024 * 1024);
 

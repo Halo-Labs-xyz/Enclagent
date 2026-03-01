@@ -109,9 +109,9 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "28", features = ["component-model"] }
-wasmtime-wasi = "28"  # WASI support for component model
-wasmparser = "0.220"  # WASM binary parsing for validation
+wasmtime = { version = "28", features = ["component-model"], optional = true }
+wasmtime-wasi = { version = "28", optional = true }  # WASI support for component model
+wasmparser = { version = "0.220", optional = true }  # WASM binary parsing for validation
 
 # Cryptography for secrets management
 aes-gcm = "0.10"
@@ -155,7 +155,7 @@ pretty_assertions = "1"
 tempfile = "3"
 
 [features]
-default = ["postgres", "libsql", "system-keyring"]
+default = ["postgres", "libsql", "system-keyring", "wasm-runtime"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -166,6 +166,7 @@ postgres = [
 ]
 libsql = ["dep:libsql"]
 system-keyring = ["dep:security-framework", "dep:secret-service", "dep:zbus"]
+wasm-runtime = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmparser"]
 integration = []
 
 # The profile that 'cargo dist' will build with

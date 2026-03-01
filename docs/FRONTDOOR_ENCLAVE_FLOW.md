@@ -200,14 +200,18 @@ The bundled provisioner script also:
 - Forces verifiable git-source builds to `--build-dockerfile Dockerfile.ecloud` (override with `ECLOUD_FRONTDOOR_BUILD_DOCKERFILE`, optional `ECLOUD_FRONTDOOR_BUILD_CONTEXT`) so EigenCloud does not fall back to the heavier frontdoor host image Dockerfile.
 - Keeps `Dockerfile.ecloud` runtime image minimal (no Node/npm/ecloud CLI install in the per-user enclave image), reducing source-build wall-clock time to stay under EigenCloud's 600s build cap.
 - Retries verifiable deploy on EigenCloud throttling/queue conflicts (`429 Too Many Requests`, `409 build already in progress`) using queue-safe fixed backoff with bounded retry budget (defaults: `ECLOUD_FRONTDOOR_DEPLOY_MAX_RETRIES=24`, `ECLOUD_FRONTDOOR_DEPLOY_RETRY_BACKOFF_SECS=15`, `ECLOUD_FRONTDOOR_DEPLOY_RETRY_TIMEOUT_SECS=900`; set `ECLOUD_FRONTDOOR_DEPLOY_MAX_RETRIES=0` to disable attempt-cap and rely on timeout budget only).
-- On `409` queue conflicts, the provisioner emits explicit EigenCloud build-queue context (`status`, `build_id`, `repo`, `git_ref`, timestamps) to timeline logs so operators can correlate frontdoor retries to the currently active upstream verifiable build.
+- On `409`/`429` queue conflicts, the provisioner emits explicit EigenCloud build-queue context (`status`, `build_id`, `repo`, `git_ref`, timestamps) to timeline logs so operators can correlate frontdoor retries to the currently active upstream verifiable build.
+- Queue discovery is tolerant of EigenCloud list/status JSON envelope variants (`[]`, `{builds:[]}`, `{items:[]}`, `{data:[]}`) before deciding whether to wait or retry.
 - When a queue/throttle response references an in-flight `build_id`, the provisioner waits on that build status (instead of repeatedly re-submitting) and only retries app deploy after the build reaches terminal state.
 - Source commit matching for queued builds accepts canonical full SHAs and short-prefix SHAs (>=7 chars), preventing false mismatch skips when environment metadata is abbreviated.
-- If the queued `build_id` belongs to a different repo/commit than the requested source provenance, provisioner treats it as queue contention, skips build-wait for that `build_id`, and continues retries with backoff instead of stalling the session on unrelated builds.
+- If the queued `build_id` belongs to a different repo/commit than the requested source provenance, provisioner waits for queue drain by default (and fails fast only when `ECLOUD_FRONTDOOR_STRICT_SOURCE_PROVENANCE=true`).
 - When verifiable mode is enabled, set `ECLOUD_FRONTDOOR_SOURCE_REPO_URL` + `ECLOUD_FRONTDOOR_SOURCE_COMMIT` so EigenCloud provenance points to the correct GitHub source.
 - Falls back to verify portal URL when direct gateway health/import seeding fails; set `ECLOUD_FRONTDOOR_STRICT_INSTANCE_INIT=true` to fail hard instead.
 - Returns `app_url` when available so frontdoor can surface distinct runtime/app/verify links instead of duplicating verify URLs.
-- If eCloud omits `App URL`, derives runtime `app_url` from verify URL + `app_id` (`verify-sepolia` -> `sepolia`) so runtime endpoint does not collapse to verify endpoint.
+- If eCloud omits `App URL`, derives runtime `app_url` from verify URL + `app_id` (`verify-sepolia` -> `sepolia`).
+- If eCloud returns an `App URL` on a verify host, normalizes it back to runtime host (`verify-*` -> non-verify host) before returning `instance_url`.
+- Picks environment-appropriate verify base by default (`sepolia` -> `verify-sepolia`, `mainnet` -> `verify-mainnet`) unless overridden by `GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL` or `ECLOUD_FRONTDOOR_VERIFY_APP_BASE_URL`.
+- Generates app names from `agent_name`/`app_name`/`profile_domain` when present (falling back to profile + wallet/session suffix) so app naming is user-specific without sacrificing determinism.
 - Forces wallet association by defaulting `wallet_vault_policy.user_wallet_address` to the connected wallet when not explicitly set.
 - Applies verification-backend overrides (`verification_backend.*`) for each spawned enclave.
 - Waits for instance health, then imports full settings (including copytrading + verification policy) via `/api/settings/import`.

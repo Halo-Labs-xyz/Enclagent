@@ -79,7 +79,7 @@ impl WasmConfig {
 
     /// Convert to WasmRuntimeConfig.
     pub fn to_runtime_config(&self) -> crate::tools::wasm::WasmRuntimeConfig {
-        use crate::tools::wasm::{FuelConfig, ResourceLimits, WasmRuntimeConfig};
+        use crate::tools::wasm::{FuelConfig, OptLevel, ResourceLimits, WasmRuntimeConfig};
 
         WasmRuntimeConfig {
             default_limits: ResourceLimits {
@@ -93,7 +93,7 @@ impl WasmConfig {
             },
             cache_compiled: self.cache_compiled,
             cache_dir: self.cache_dir.clone(),
-            optimization_level: wasmtime::OptLevel::Speed,
+            optimization_level: OptLevel::Speed,
         }
     }
 }

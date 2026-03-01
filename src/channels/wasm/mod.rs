@@ -81,25 +81,43 @@
 mod bundled;
 mod capabilities;
 mod error;
+#[cfg(feature = "wasm-runtime")]
 mod host;
+#[cfg(feature = "wasm-runtime")]
 mod loader;
+#[cfg(feature = "wasm-runtime")]
 mod router;
+#[cfg(feature = "wasm-runtime")]
 mod runtime;
 mod schema;
+#[cfg(feature = "wasm-runtime")]
 mod wrapper;
+#[cfg(not(feature = "wasm-runtime"))]
+mod stubs;
 
 // Core types
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
 pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
 pub use error::WasmChannelError;
+#[cfg(feature = "wasm-runtime")]
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
+#[cfg(feature = "wasm-runtime")]
 pub use loader::{
     DiscoveredChannel, LoadResults, LoadedChannel, WasmChannelLoader, default_channels_dir,
     discover_channels,
 };
+#[cfg(feature = "wasm-runtime")]
 pub use router::{RegisteredEndpoint, WasmChannelRouter, create_wasm_channel_router};
+#[cfg(feature = "wasm-runtime")]
 pub use runtime::{PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig};
 pub use schema::{
     ChannelCapabilitiesFile, ChannelConfig, SecretSetupSchema, SetupSchema, WebhookSchema,
 };
+#[cfg(feature = "wasm-runtime")]
 pub use wrapper::{HttpResponse, SharedWasmChannel, WasmChannel};
+#[cfg(not(feature = "wasm-runtime"))]
+pub use stubs::{
+    DiscoveredChannel, HttpResponse, LoadResults, LoadedChannel, RegisteredEndpoint,
+    SharedWasmChannel, WasmChannel, WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime,
+    WasmChannelRuntimeConfig, create_wasm_channel_router, default_channels_dir, discover_channels,
+};

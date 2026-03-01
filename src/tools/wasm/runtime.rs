@@ -9,7 +9,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
-use wasmtime::{Config, Engine, OptLevel};
+use wasmtime::{Config, Engine};
+pub use wasmtime::OptLevel;
 
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};

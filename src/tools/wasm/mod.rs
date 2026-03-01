@@ -80,11 +80,20 @@ mod credential_injector;
 mod error;
 mod host;
 mod limits;
+#[cfg(feature = "wasm-runtime")]
 mod loader;
+#[cfg(not(feature = "wasm-runtime"))]
+mod loader_stub;
 mod rate_limiter;
+#[cfg(feature = "wasm-runtime")]
 mod runtime;
+#[cfg(not(feature = "wasm-runtime"))]
+mod runtime_stub;
 mod storage;
+#[cfg(feature = "wasm-runtime")]
 mod wrapper;
+#[cfg(not(feature = "wasm-runtime"))]
+mod wrapper_stub;
 
 // Core types
 pub use error::{TrapCode, TrapInfo, WasmError};
@@ -93,8 +102,14 @@ pub use limits::{
     DEFAULT_FUEL_LIMIT, DEFAULT_MEMORY_LIMIT, DEFAULT_TIMEOUT, FuelConfig, ResourceLimits,
     WasmResourceLimiter,
 };
-pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
+#[cfg(feature = "wasm-runtime")]
+pub use runtime::{OptLevel, PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
+#[cfg(not(feature = "wasm-runtime"))]
+pub use runtime_stub::{OptLevel, PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
+#[cfg(feature = "wasm-runtime")]
 pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
+#[cfg(not(feature = "wasm-runtime"))]
+pub use wrapper_stub::{OAuthRefreshConfig, WasmToolWrapper};
 
 // Capabilities (V2)
 pub use capabilities::{
@@ -118,7 +133,13 @@ pub use storage::{
 };
 
 // Loader
+#[cfg(feature = "wasm-runtime")]
 pub use loader::{
+    DiscoveredTool, LoadResults, WasmLoadError, WasmToolLoader, discover_dev_tools, discover_tools,
+    load_dev_tools,
+};
+#[cfg(not(feature = "wasm-runtime"))]
+pub use loader_stub::{
     DiscoveredTool, LoadResults, WasmLoadError, WasmToolLoader, discover_dev_tools, discover_tools,
     load_dev_tools,
 };

@@ -74,7 +74,28 @@ process.stdin.on("end", () => {
 });
 ')"
 
+agent_label="$(printf '%s' "$config_json" | node -e '
+let data = "";
+process.stdin.on("data", (d) => data += d);
+process.stdin.on("end", () => {
+  const parsed = JSON.parse(data || "{}");
+  process.stdout.write(
+    String(
+      parsed.agent_name ||
+      parsed.app_name ||
+      parsed.profile_domain ||
+      parsed.user_name ||
+      ""
+    )
+  );
+});
+')"
+
 owner_wallet="$(printf '%s' "$wallet" | tr '[:upper:]' '[:lower:]')"
+active_queue_build_id=""
+active_queue_build_status=""
+active_queue_build_repo=""
+active_queue_build_ref=""
 
 normalize_repo_url() {
   node -e '
@@ -168,6 +189,28 @@ process.stdout.write(out);
 ' "$1" "$2"
 }
 
+is_verify_url() {
+  node -e '
+const raw = String(process.argv[1] || "").trim();
+if (!raw) process.exit(1);
+try {
+  const url = new URL(raw);
+  const host = String(url.hostname || "").toLowerCase();
+  if (!host) process.exit(1);
+  if (
+    host === "verify-sepolia.eigencloud.xyz" ||
+    host === "verify-mainnet.eigencloud.xyz" ||
+    host === "verify.eigencloud.xyz" ||
+    host.startsWith("verify-") ||
+    host.startsWith("verify.")
+  ) process.exit(0);
+  process.exit(1);
+} catch (_err) {
+  process.exit(1);
+}
+' "$1"
+}
+
 log_phase() {
   printf 'provision_phase: %s\n' "$1" >&2
 }
@@ -226,9 +269,10 @@ env_name="${ECLOUD_ENV:-sepolia}"
 prefix="${ECLOUD_FRONTDOOR_APP_PREFIX:-enclagent-user}"
 name="$(node -e '
 const rawPrefix = process.argv[1] || "enclagent-user";
-const rawProfile = process.argv[2] || "session";
-const rawWallet = process.argv[3] || "";
-const rawSession = process.argv[4] || "";
+const rawLabel = process.argv[2] || "";
+const rawProfile = process.argv[3] || "session";
+const rawWallet = process.argv[4] || "";
+const rawSession = process.argv[5] || "";
 const slug = (value, fallback, maxLen) => {
   const normalized = String(value || "")
     .toLowerCase()
@@ -238,7 +282,8 @@ const slug = (value, fallback, maxLen) => {
   return trimmed || fallback;
 };
 const prefix = slug(rawPrefix, "enclagent", 16);
-let profile = slug(rawProfile, "session", 20);
+const profileSeed = rawLabel || rawProfile;
+let profile = slug(profileSeed, "session", 20);
 const walletHex = String(rawWallet || "")
   .toLowerCase()
   .replace(/^0x/, "")
@@ -260,7 +305,7 @@ if (name.length > 50) {
   name = name.slice(0, 50).replace(/-+$/g, "");
 }
 process.stdout.write(name || `enclagent-${sessionTag}`);
-' "$prefix" "$profile_name" "$wallet" "$session")"
+' "$prefix" "$agent_label" "$profile_name" "$wallet" "$session")"
 description="Enclagent session ${session:0:12} (${profile_name})"
 instance_type="${ECLOUD_FRONTDOOR_INSTANCE_TYPE:-g1-standard-4t}"
 instance_port="${ECLOUD_FRONTDOOR_INSTANCE_PORT:-3000}"
@@ -438,7 +483,16 @@ capture_active_build_context() {
 const raw = require("fs").readFileSync(0, "utf8");
 try {
   const parsed = JSON.parse(raw);
-  const latest = Array.isArray(parsed) ? parsed[0] : null;
+  const list = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed.builds)
+      ? parsed.builds
+      : Array.isArray(parsed.items)
+        ? parsed.items
+        : Array.isArray(parsed.data)
+          ? parsed.data
+          : [];
+  const latest = list[0] || (parsed && parsed.buildId ? parsed : null);
   if (!latest || typeof latest !== "object") process.exit(0);
   const status = String(latest.status || "").toLowerCase();
   if (!status) process.exit(0);
@@ -460,6 +514,11 @@ try {
   process.exit(0);
 }
 ')" || true
+
+  active_queue_build_id="$(printf '%s' "$build_context" | sed -n 's/.*build_id=\([^ ]*\).*/\1/p' | tail -n1)"
+  active_queue_build_status="$(printf '%s' "$build_context" | sed -n 's/.*status=\([^ ]*\).*/\1/p' | tail -n1)"
+  active_queue_build_repo="$(printf '%s' "$build_context" | sed -n 's/.*repo=\([^ ]*\).*/\1/p' | tail -n1)"
+  active_queue_build_ref="$(printf '%s' "$build_context" | sed -n 's/.*git_ref=\([^ ]*\).*/\1/p' | tail -n1)"
 
   if [[ -n "$build_context" ]]; then
     log_phase "eigencloud build queue context ${build_context}"
@@ -507,7 +566,15 @@ const activeStatuses = new Set([
 const normalizeRepo = (value) => String(value || "").replace(/\.git$/i, "").toLowerCase();
 try {
   const parsed = JSON.parse(raw);
-  const builds = Array.isArray(parsed) ? parsed : [];
+  const builds = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray(parsed.builds)
+      ? parsed.builds
+      : Array.isArray(parsed.items)
+        ? parsed.items
+        : Array.isArray(parsed.data)
+          ? parsed.data
+          : [];
   const matching = builds.find((item) => {
     const status = String(item.status || "").toLowerCase();
     if (!activeStatuses.has(status)) return false;
@@ -693,6 +760,7 @@ try {
 }
 
 log_phase "eigencloud provisioning started env=${env_name} ironclaw_profile=${profile_name} session=${session}"
+log_phase "eigencloud app identity name=${name}"
 if [[ -n "$source_repo_url" && -n "$source_commit" ]]; then
   log_phase "eigencloud verifiable source repo=${source_repo_url} commit=${source_commit}"
   if [[ -n "${verifiable_build_dockerfile:-}" ]]; then
@@ -723,9 +791,9 @@ while true; do
 
   if printf '%s' "$deploy_output" | grep -Eiq 'buildapi request failed:\s*429|too many requests|buildapi request failed:\s*409|already have a build in progress'; then
     retry_reason="eigencloud_build_queue_or_throttle"
+    capture_active_build_context
     if printf '%s' "$deploy_output" | grep -Eiq 'buildapi request failed:\s*409|already have a build in progress'; then
       retry_reason="eigencloud_build_queue_conflict_409"
-      capture_active_build_context
     elif printf '%s' "$deploy_output" | grep -Eiq 'buildapi request failed:\s*429|too many requests'; then
       retry_reason="eigencloud_build_throttle_429"
     fi
@@ -746,26 +814,37 @@ while true; do
     fi
 
     active_build_id="$(extract_build_id_from_text "$deploy_output")"
+    if [[ -z "$active_build_id" && -n "$active_queue_build_id" ]]; then
+      active_build_id="$active_queue_build_id"
+    fi
     if [[ -z "$active_build_id" ]]; then
       active_build_id="$(resolve_active_build_id_from_queue)"
     fi
     if [[ -n "$active_build_id" ]]; then
       log_phase "eigencloud queue conflict resolved active_build_id=${active_build_id} reason=${retry_reason}"
       if ! build_id_matches_expected_source "$active_build_id"; then
-        echo "warning: queued build ${active_build_id} does not match requested source provenance; skipping wait and retrying deploy" >&2
-      else
-        log_phase "eigencloud waiting for active build build_id=${active_build_id} remaining_retry_budget_secs=${remaining_retry_budget}"
-        wait_for_build_terminal_state "$active_build_id" "$remaining_retry_budget"
-        wait_result=$?
-        if (( wait_result == 0 )); then
-          log_phase "eigencloud active build complete build_id=${active_build_id}; retrying deploy command"
-          deploy_attempt=$((deploy_attempt + 1))
-          continue
-        elif (( wait_result == 2 )); then
+        if [[ "$strict_source_provenance" =~ ^(true|1|yes|on)$ ]]; then
           echo "$deploy_output" >&2
-          echo "error: eigencloud build ${active_build_id} failed; aborting deploy retry loop" >&2
+          echo "error: queued build ${active_build_id} does not match requested source provenance and strict mode is enabled" >&2
           exit 1
         fi
+        echo "warning: queued build ${active_build_id} does not match requested source provenance; waiting for queue drain before retry" >&2
+      fi
+      log_phase "eigencloud waiting for active build build_id=${active_build_id} remaining_retry_budget_secs=${remaining_retry_budget}"
+      set +e
+      wait_for_build_terminal_state "$active_build_id" "$remaining_retry_budget"
+      wait_result=$?
+      set -e
+      if (( wait_result == 0 )); then
+        log_phase "eigencloud active build complete build_id=${active_build_id}; retrying deploy command"
+        deploy_attempt=$((deploy_attempt + 1))
+        continue
+      elif (( wait_result == 2 )); then
+        echo "$deploy_output" >&2
+        echo "error: eigencloud build ${active_build_id} failed; aborting deploy retry loop" >&2
+        exit 1
+      else
+        log_phase "eigencloud active build wait timed out build_id=${active_build_id}; falling back to timed retry"
       fi
     else
       log_phase "eigencloud queue conflict without discoverable build id; falling back to timed retry"
@@ -832,13 +911,29 @@ if [[ -z "$app_url" ]]; then
   fi
 fi
 
-verify_base="${GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL:-https://verify-sepolia.eigencloud.xyz/app}"
+verify_base="${GATEWAY_FRONTDOOR_VERIFY_APP_BASE_URL:-${ECLOUD_FRONTDOOR_VERIFY_APP_BASE_URL:-}}"
+if [[ -z "$verify_base" ]]; then
+  case "$env_name" in
+    mainnet) verify_base="https://verify-mainnet.eigencloud.xyz/app" ;;
+    *) verify_base="https://verify-sepolia.eigencloud.xyz/app" ;;
+  esac
+fi
 verify_url="${verify_base%/}/${app_id}"
 
 if [[ -z "$app_url" ]]; then
   inferred_app_url="$(infer_app_url_from_verify_url "$verify_url" "$app_id")"
   if [[ -n "$inferred_app_url" ]]; then
     app_url="$inferred_app_url"
+  fi
+fi
+
+if [[ -n "$app_url" ]] && is_verify_url "$app_url"; then
+  normalized_app_url="$(infer_app_url_from_verify_url "$app_url" "$app_id")"
+  if [[ -n "$normalized_app_url" && "$normalized_app_url" != "$app_url" ]]; then
+    log_phase "eigencloud app url normalized from verify host app_id=${app_id} app_url=${normalized_app_url}"
+    app_url="$normalized_app_url"
+  else
+    echo "warning: app URL resolved to verify host for app ${app_id}; runtime URL may be unavailable" >&2
   fi
 fi
 

@@ -142,9 +142,12 @@ impl WasmValidator {
     /// Validate WASM bytes.
     pub fn validate_bytes(&self, bytes: &[u8]) -> Result<ValidationResult, ValidationError> {
         let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-        let mut exports = Vec::new();
-        let mut imports = Vec::new();
+        #[allow(unused_mut, unused_variables)]
+        let mut warnings: Vec<String> = Vec::new();
+        #[allow(unused_mut, unused_variables)]
+        let mut exports: Vec<ExportInfo> = Vec::new();
+        #[allow(unused_mut, unused_variables)]
+        let mut imports: Vec<ImportInfo> = Vec::new();
         let size_bytes = bytes.len() as u64;
 
         // Check size
@@ -155,6 +158,16 @@ impl WasmValidator {
             });
         }
 
+        #[cfg(not(feature = "wasm-runtime"))]
+        {
+            return Err(ValidationError::Other(
+                "WASM validation is unavailable in this build (enable feature \"wasm-runtime\")"
+                    .to_string(),
+            ));
+        }
+
+        #[cfg(feature = "wasm-runtime")]
+        {
         // Parse WASM module
         let parser = wasmparser::Parser::new(0);
 
@@ -273,14 +286,15 @@ impl WasmValidator {
             }
         }
 
-        Ok(ValidationResult {
-            is_valid: errors.is_empty(),
-            errors,
-            warnings,
-            exports,
-            imports,
-            size_bytes,
-        })
+            Ok(ValidationResult {
+                is_valid: errors.is_empty(),
+                errors,
+                warnings,
+                exports,
+                imports,
+                size_bytes,
+            })
+        }
     }
 }
 
