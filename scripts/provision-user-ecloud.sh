@@ -524,6 +524,7 @@ build_id_matches_expected_source() {
   local expected_commit
   local actual_repo
   local actual_commit
+  local commit_match=1
 
   if [[ -z "$build_id" ]]; then
     return 1
@@ -565,7 +566,18 @@ try {
   if [[ -z "$actual_repo" || -z "$actual_commit" ]]; then
     return 0
   fi
-  if [[ "$actual_repo" == "$expected_repo" && "$actual_commit" == "$expected_commit" ]]; then
+  if [[ "$actual_commit" == "$expected_commit" ]]; then
+    commit_match=0
+  elif [[ ${#expected_commit} -ge 7 && "$actual_commit" == "$expected_commit"* ]]; then
+    commit_match=0
+  elif [[ ${#actual_commit} -ge 7 && "$expected_commit" == "$actual_commit"* ]]; then
+    commit_match=0
+  fi
+
+  if [[ "$actual_repo" == "$expected_repo" && "$commit_match" -eq 0 ]]; then
+    if [[ "$actual_commit" != "$expected_commit" ]]; then
+      log_phase "eigencloud build commit prefix match build_id=${build_id} expected_commit=${expected_commit} actual_commit=${actual_commit}"
+    fi
     return 0
   fi
 
@@ -727,12 +739,15 @@ while true; do
       active_build_id="$(resolve_active_build_id_from_queue)"
     fi
     if [[ -n "$active_build_id" ]]; then
+      log_phase "eigencloud queue conflict resolved active_build_id=${active_build_id} reason=${retry_reason}"
       if ! build_id_matches_expected_source "$active_build_id"; then
         echo "warning: queued build ${active_build_id} does not match requested source provenance; skipping wait and retrying deploy" >&2
       else
+        log_phase "eigencloud waiting for active build build_id=${active_build_id} remaining_retry_budget_secs=${remaining_retry_budget}"
         wait_for_build_terminal_state "$active_build_id" "$remaining_retry_budget"
         wait_result=$?
         if (( wait_result == 0 )); then
+          log_phase "eigencloud active build complete build_id=${active_build_id}; retrying deploy command"
           deploy_attempt=$((deploy_attempt + 1))
           continue
         elif (( wait_result == 2 )); then
@@ -741,6 +756,8 @@ while true; do
           exit 1
         fi
       fi
+    else
+      log_phase "eigencloud queue conflict without discoverable build id; falling back to timed retry"
     fi
 
     if (( deploy_max_retries_raw > 0 && deploy_attempt >= deploy_max_retries_raw )); then
