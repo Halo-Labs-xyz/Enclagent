@@ -376,6 +376,14 @@ strict_source_provenance="$(printf '%s' "${ECLOUD_FRONTDOOR_STRICT_SOURCE_PROVEN
 verifiable_source_args=()
 if [[ -n "$source_repo_url" && -n "$source_commit" ]]; then
   verifiable_source_args+=(--repo "$source_repo_url" --commit "$source_commit")
+  verifiable_build_dockerfile="${ECLOUD_FRONTDOOR_BUILD_DOCKERFILE:-Dockerfile.ecloud}"
+  if [[ -n "$verifiable_build_dockerfile" ]]; then
+    verifiable_source_args+=(--build-dockerfile "$verifiable_build_dockerfile")
+  fi
+  verifiable_build_context="${ECLOUD_FRONTDOOR_BUILD_CONTEXT:-}"
+  if [[ -n "$verifiable_build_context" ]]; then
+    verifiable_source_args+=(--build-context "$verifiable_build_context")
+  fi
 elif [[ -n "$source_repo_url" || -n "$source_commit" ]]; then
   echo "warning: incomplete source provenance metadata; both repo URL and commit are required" >&2
   if [[ "$strict_source_provenance" =~ ^(true|1|yes|on)$ ]]; then
@@ -687,6 +695,9 @@ try {
 log_phase "eigencloud provisioning started env=${env_name} ironclaw_profile=${profile_name} session=${session}"
 if [[ -n "$source_repo_url" && -n "$source_commit" ]]; then
   log_phase "eigencloud verifiable source repo=${source_repo_url} commit=${source_commit}"
+  if [[ -n "${verifiable_build_dockerfile:-}" ]]; then
+    log_phase "eigencloud verifiable build config dockerfile=${verifiable_build_dockerfile} build_context=${verifiable_build_context:-.}"
+  fi
 fi
 
 deploy_attempt=1
