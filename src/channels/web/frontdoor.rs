@@ -2580,6 +2580,104 @@ fn looks_like_eigencloud_url(candidate: &str) -> bool {
         || host.ends_with(".eigencloud.xyz")
 }
 
+fn provisioning_result_from_json_value(
+    value: &serde_json::Value,
+    verify_base_url: Option<&str>,
+) -> Option<ProvisioningResult> {
+    let mut instance_url = value
+        .get("instance_url")
+        .or_else(|| value.get("gateway_url"))
+        .or_else(|| value.get("url"))
+        .and_then(|x| x.as_str())
+        .map(|v| v.to_string());
+    let mut app_url = value
+        .get("app_url")
+        .or_else(|| value.get("eigen_app_console_url"))
+        .and_then(|x| x.as_str())
+        .map(|v| v.to_string());
+    let mut verify_url = value
+        .get("verify_url")
+        .or_else(|| value.get("eigen_verify_url"))
+        .or_else(|| value.get("eigen_app_url"))
+        .and_then(|x| x.as_str())
+        .map(|v| v.to_string());
+    let eigen_app_id = value
+        .get("eigen_app_id")
+        .or_else(|| value.get("app_id"))
+        .and_then(|x| x.as_str())
+        .map(|v| v.to_string());
+    if verify_url.is_none() {
+        if let Some(app_id) = eigen_app_id.as_deref() {
+            verify_url = build_verify_app_url(verify_base_url, app_id);
+        } else if let Some(instance) = instance_url.as_deref()
+            && looks_like_verify_url(instance)
+        {
+            verify_url = Some(instance.to_string());
+        }
+    }
+    let should_infer_app_url = app_url.is_none()
+        && (instance_url.is_none()
+            || instance_url
+                .as_deref()
+                .map(looks_like_verify_url)
+                .unwrap_or(false));
+    if should_infer_app_url {
+        app_url = verify_url
+            .as_deref()
+            .and_then(|url| build_app_url_from_verify_url(url, eigen_app_id.as_deref()));
+    }
+    if let Some(instance) = instance_url.as_deref()
+        && looks_like_verify_url(instance)
+        && app_url.is_some()
+    {
+        instance_url = app_url.clone();
+    }
+    if instance_url.is_none() {
+        instance_url = app_url.clone().or_else(|| verify_url.clone());
+    }
+    let instance_url = instance_url?;
+    Some(ProvisioningResult {
+        instance_url,
+        app_url,
+        verify_url,
+        eigen_app_id,
+    })
+}
+
+fn parse_json_line_candidate(line: &str) -> Option<serde_json::Value> {
+    let candidate = line.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
+        return Some(value);
+    }
+
+    let start = candidate.find('{')?;
+    let end = candidate.rfind('}')?;
+    if start >= end {
+        return None;
+    }
+    serde_json::from_str::<serde_json::Value>(&candidate[start..=end]).ok()
+}
+
+fn looks_like_runtime_instance_url(candidate: &str) -> bool {
+    if looks_like_eigencloud_url(candidate) || looks_like_verify_url(candidate) {
+        return true;
+    }
+    let Ok(url) = Url::parse(candidate) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+    if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+        return true;
+    }
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    url.path().to_ascii_lowercase().contains("/gateway")
+}
+
 fn execute_provision_output(
     stdout: &str,
     verify_base_url: Option<&str>,
@@ -2589,83 +2687,58 @@ fn execute_provision_output(
         return None;
     }
 
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        let mut instance_url = v
-            .get("instance_url")
-            .or_else(|| v.get("gateway_url"))
-            .or_else(|| v.get("url"))
-            .and_then(|x| x.as_str())
-            .map(|v| v.to_string());
-        let mut app_url = v
-            .get("app_url")
-            .or_else(|| v.get("eigen_app_console_url"))
-            .and_then(|x| x.as_str())
-            .map(|v| v.to_string());
-        let mut verify_url = v
-            .get("verify_url")
-            .or_else(|| v.get("eigen_verify_url"))
-            .or_else(|| v.get("eigen_app_url"))
-            .and_then(|x| x.as_str())
-            .map(|v| v.to_string());
-        let eigen_app_id = v
-            .get("eigen_app_id")
-            .or_else(|| v.get("app_id"))
-            .and_then(|x| x.as_str())
-            .map(|v| v.to_string());
-        if verify_url.is_none() {
-            if let Some(app_id) = eigen_app_id.as_deref() {
-                verify_url = build_verify_app_url(verify_base_url, app_id);
-            } else if let Some(instance) = instance_url.as_deref()
-                && looks_like_verify_url(instance)
-            {
-                verify_url = Some(instance.to_string());
-            }
-        }
-        let should_infer_app_url = app_url.is_none()
-            && (instance_url.is_none()
-                || instance_url
-                    .as_deref()
-                    .map(looks_like_verify_url)
-                    .unwrap_or(false));
-        if should_infer_app_url {
-            app_url = verify_url
-                .as_deref()
-                .and_then(|url| build_app_url_from_verify_url(url, eigen_app_id.as_deref()));
-        }
-        if let Some(instance) = instance_url.as_deref()
-            && looks_like_verify_url(instance)
-            && app_url.is_some()
-        {
-            instance_url = app_url.clone();
-        }
-        if instance_url.is_none() {
-            instance_url = app_url.clone().or_else(|| verify_url.clone());
-        }
-        if let Some(instance_url) = instance_url {
-            return Some(ProvisioningResult {
-                instance_url,
-                app_url,
-                verify_url,
-                eigen_app_id,
-            });
-        }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(result) = provisioning_result_from_json_value(&value, verify_base_url)
+    {
+        return Some(result);
     }
 
     for line in trimmed.lines().rev() {
+        if let Some(value) = parse_json_line_candidate(line)
+            && let Some(result) = provisioning_result_from_json_value(&value, verify_base_url)
+        {
+            return Some(result);
+        }
+    }
+
+    let mut url_candidates = Vec::new();
+    for line in trimmed.lines().rev() {
         let candidate = line.trim();
         if candidate.starts_with("http://") || candidate.starts_with("https://") {
-            let verify_url = if looks_like_verify_url(candidate) {
-                Some(candidate.to_string())
-            } else {
-                None
-            };
-            return Some(ProvisioningResult {
-                instance_url: candidate.to_string(),
-                app_url: None,
-                verify_url,
-                eigen_app_id: None,
-            });
+            url_candidates.push(candidate.to_string());
         }
+    }
+
+    if let Some(candidate) = url_candidates
+        .iter()
+        .find(|candidate| looks_like_runtime_instance_url(candidate.as_str()))
+    {
+        let verify_url = if looks_like_verify_url(candidate) {
+            Some(candidate.to_string())
+        } else {
+            None
+        };
+        return Some(ProvisioningResult {
+            instance_url: candidate.to_string(),
+            app_url: None,
+            verify_url,
+            eigen_app_id: None,
+        });
+    }
+
+    if url_candidates.len() == 1 {
+        let candidate = &url_candidates[0];
+        let verify_url = if looks_like_verify_url(candidate) {
+            Some(candidate.to_string())
+        } else {
+            None
+        };
+        return Some(ProvisioningResult {
+            instance_url: candidate.to_string(),
+            app_url: None,
+            verify_url,
+            eigen_app_id: None,
+        });
     }
 
     None
@@ -4910,6 +4983,32 @@ mod tests {
         assert_eq!(
             result.verify_url.as_deref(),
             Some("https://verify-sepolia.eigencloud.xyz/app/0x1234")
+        );
+
+        let mixed_output = concat!(
+            "provision_phase: eigencloud verifiable source repo=https://github.com/Layr-Labs/eigencompute-containers commit=37b11a303174f75486158e637ba59fecb53f0ce1\n",
+            "https://github.com/Layr-Labs/eigencompute-containers/tree/37b11a303174f75486158e637ba59fecb53f0ce1\n",
+            r#"{"instance_url":"https://sepolia.eigencloud.xyz/app/0xbeef","app_url":"https://sepolia.eigencloud.xyz/app/0xbeef","verify_url":"https://verify-sepolia.eigencloud.xyz/app/0xbeef","app_id":"0xbeef"}"#,
+            "\n",
+        );
+        let result = execute_provision_output(mixed_output, None).expect("mixed output payload");
+        assert_eq!(result.instance_url, "https://sepolia.eigencloud.xyz/app/0xbeef");
+        assert_eq!(
+            result.app_url.as_deref(),
+            Some("https://sepolia.eigencloud.xyz/app/0xbeef")
+        );
+        assert_eq!(
+            result.verify_url.as_deref(),
+            Some("https://verify-sepolia.eigencloud.xyz/app/0xbeef")
+        );
+
+        let ambiguous_noisy_urls = concat!(
+            "https://github.com/Layr-Labs/eigencompute-containers\n",
+            "https://github.com/Layr-Labs/eigencompute-containers/tree/main\n",
+        );
+        assert!(
+            execute_provision_output(ambiguous_noisy_urls, None).is_none(),
+            "ambiguous non-runtime URLs should not be promoted as instance_url"
         );
     }
 

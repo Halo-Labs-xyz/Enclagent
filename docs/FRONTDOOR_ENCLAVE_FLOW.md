@@ -128,8 +128,9 @@ Configure one provisioning path:
 
 The command **must print** provisioning output to stdout:
 
-- Plain URL line is accepted.
+- Plain URL line is accepted for simple provisioners that emit only one URL.
 - JSON is preferred to return both gateway URL and Eigen verify URL.
+- Mixed output is supported: commands may emit logs plus a JSON payload line. Frontdoor scans the full output and prioritizes structured JSON payload fields over generic log URLs.
 - Supported JSON keys:
   - `instance_url` / `url` / `gateway_url`
   - `app_url`
